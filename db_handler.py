@@ -350,3 +350,90 @@ class DatabaseHandler:
             if self.app_master_ref:
                 messagebox.showerror("Eroare Execuție Query", f"Eroare SQL: {e.msg}", parent=self.app_master_ref)
             return False
+
+    def get_all_roles(self):
+        """Returnează toate rolurile definite în baza de date."""
+        if not self.is_connected(): return []
+        return self.fetch_all_dict("SELECT id, nume_rol FROM roluri ORDER BY nume_rol ASC")
+
+    def get_user_details(self, user_id):
+        """Returnează detaliile complete pentru un utilizator, inclusiv rolurile și conturile asignate."""
+        if not self.is_connected(): return None
+
+        user_info = self.fetch_one_dict("SELECT id, username, nume_complet, activ FROM utilizatori WHERE id = %s", (user_id,))
+        if not user_info:
+            return None
+
+        # Preluăm ID-urile rolurilor asignate utilizatorului
+        roles_raw = self.fetch_all_dict("SELECT id_rol FROM utilizatori_roluri WHERE id_utilizator = %s", (user_id,))
+        user_info['role_ids'] = {r['id_rol'] for r in roles_raw}
+
+        # Preluăm ID-urile conturilor permise pentru utilizator
+        accounts_raw = self.fetch_all_dict("SELECT id_cont FROM utilizatori_conturi_permise WHERE id_utilizator = %s", (user_id,))
+        user_info['account_ids'] = {acc['id_cont'] for acc in accounts_raw}
+
+        return user_info
+
+    def get_all_users_with_roles(self):
+        """Preia toți utilizatorii și o listă concatenată a rolurilor lor."""
+        if not self.is_connected(): return []
+        query = """
+            SELECT u.id, u.username, u.nume_complet, u.activ, 
+                   GROUP_CONCAT(r.nume_rol SEPARATOR ', ') as roluri
+            FROM utilizatori u
+            LEFT JOIN utilizatori_roluri ur ON u.id = ur.id_utilizator
+            LEFT JOIN roluri r ON ur.id_rol = r.id
+            GROUP BY u.id, u.username, u.nume_complet, u.activ
+            ORDER BY u.username ASC;
+        """
+        return self.fetch_all_dict(query)
+
+    def toggle_user_status(self, user_id):
+        """Inversează starea 'activ' a unui utilizator."""
+        if not self.is_connected(): return False
+        # Prevenim dezactivarea utilizatorului cu ID 1 (considerat super-admin)
+        if user_id == 1:
+            logging.warning("Încercare de dezactivare a utilizatorului cu ID 1 (admin) a fost blocată.")
+            return False, "Utilizatorul administrator principal nu poate fi dezactivat."
+
+        query = "UPDATE utilizatori SET activ = NOT activ WHERE id = %s AND id != 1"
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute(query, (user_id,))
+            self.conn.commit()
+            return True, "Starea utilizatorului a fost actualizată."
+        except mysql.connector.Error as e:
+            logging.error(f"Eroare la schimbarea stării utilizatorului ID {user_id}: {e}")
+            return False, f"Eroare DB: {e.msg}"
+        
+    def count_active_admins(self):
+        """Numără câți utilizatori activi au rolul de Administrator."""
+        if not self.is_connected(): return 0
+        query = """
+            SELECT COUNT(u.id)
+            FROM utilizatori u
+            JOIN utilizatori_roluri ur ON u.id = ur.id_utilizator
+            JOIN roluri r ON ur.id_rol = r.id
+            WHERE u.activ = TRUE AND r.nume_rol = 'Administrator';
+        """
+        count = self.fetch_scalar(query)
+        return count if count is not None else 0
+
+    def delete_user(self, user_id):
+        """Șterge un utilizator din baza de date."""
+        if user_id == 1:
+            return False, "Utilizatorul administrator principal (ID 1) nu poate fi șters."
+        if not self.is_connected():
+            return False, "Fără conexiune la baza de date."
+        
+        # 'ON DELETE CASCADE' din schema DB se va ocupa de ștergerea legăturilor
+        # din tabelele utilizatori_roluri și utilizatori_conturi_permise.
+        query = "DELETE FROM utilizatori WHERE id = %s"
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute(query, (user_id,))
+            self.conn.commit()
+            return True, "Utilizatorul a fost șters cu succes."
+        except mysql.connector.Error as e:
+            self.conn.rollback()
+            return False, f"Eroare DB la ștergere: {e.msg}"

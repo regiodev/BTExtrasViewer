@@ -689,3 +689,370 @@ class LoginDialog(simpledialog.Dialog):
         # Metoda `apply` este apelată automat de `simpledialog.Dialog` după ce `validate` returnează True.
         # Rezultatul (self.result) a fost deja setat în `validate`.
         pass
+
+class UserEditDialog(simpledialog.Dialog):
+    """Dialog modal pentru adăugarea sau modificarea unui utilizator."""
+    def __init__(self, parent, db_handler, user_id=None):
+        self.db_handler = db_handler
+        self.user_id = user_id
+        self.user_data = None
+        
+        if self.user_id:
+            # Mod de editare: preluăm datele existente
+            self.user_data = self.db_handler.get_user_details(self.user_id)
+            title = f"Editare Utilizator: {self.user_data['username']}"
+        else:
+            # Mod de adăugare
+            title = "Adaugă Utilizator Nou"
+        
+        super().__init__(parent, title)
+
+    def body(self, master):
+        main_frame = ttk.Frame(master)
+        main_frame.pack(padx=10, pady=10)
+
+        # --- Secțiunea Date de Bază ---
+        details_frame = ttk.LabelFrame(main_frame, text="Detalii Utilizator")
+        details_frame.grid(row=0, column=0, padx=5, pady=5, sticky="ew")
+
+        tk.Label(details_frame, text="Nume utilizator*:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
+        self.username_entry = tk.Entry(details_frame, width=40)
+        self.username_entry.grid(row=0, column=1, padx=5, pady=2)
+
+        tk.Label(details_frame, text="Nume complet:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
+        self.fullname_entry = tk.Entry(details_frame, width=40)
+        self.fullname_entry.grid(row=1, column=1, padx=5, pady=2)
+
+        password_label_text = "Parola*:" if not self.user_id else "Parolă nouă:"
+        tk.Label(details_frame, text=password_label_text).grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
+        self.password_entry = tk.Entry(details_frame, show="*", width=40)
+        self.password_entry.grid(row=2, column=1, padx=5, pady=2)
+        if self.user_id:
+            tk.Label(details_frame, text="(lasă gol pentru a nu schimba)", font=("TkDefaultFont", 8, "italic")).grid(row=2, column=2, sticky=tk.W)
+
+        # --- Secțiunea Permisiuni (Roluri și Conturi) ---
+        permissions_frame = ttk.Frame(main_frame)
+        permissions_frame.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
+        permissions_frame.grid_columnconfigure(0, weight=1)
+        permissions_frame.grid_columnconfigure(1, weight=1)
+
+        # Lista de Roluri
+        roles_frame = ttk.LabelFrame(permissions_frame, text="Roluri Asignate")
+        roles_frame.grid(row=0, column=0, padx=(0, 5), pady=5, sticky="ns")
+        
+        self.roles_listbox = tk.Listbox(roles_frame, selectmode=tk.MULTIPLE, exportselection=False)
+        roles_scrollbar = ttk.Scrollbar(roles_frame, orient=tk.VERTICAL, command=self.roles_listbox.yview)
+        self.roles_listbox.configure(yscrollcommand=roles_scrollbar.set)
+        self.roles_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        roles_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.all_roles = self.db_handler.get_all_roles()
+        for role in self.all_roles:
+            self.roles_listbox.insert(tk.END, role['nume_rol'])
+
+        # Lista de Conturi Bancare Permise
+        accounts_frame = ttk.LabelFrame(permissions_frame, text="Conturi Bancare Permise")
+        accounts_frame.grid(row=0, column=1, padx=(5, 0), pady=5, sticky="ns")
+
+        self.accounts_listbox = tk.Listbox(accounts_frame, selectmode=tk.MULTIPLE, exportselection=False)
+        accounts_scrollbar = ttk.Scrollbar(accounts_frame, orient=tk.VERTICAL, command=self.accounts_listbox.yview)
+        self.accounts_listbox.configure(yscrollcommand=accounts_scrollbar.set)
+        self.accounts_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        accounts_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.all_accounts = self.db_handler.get_all_accounts()
+        for acc in self.all_accounts:
+            self.accounts_listbox.insert(tk.END, acc['nume_cont'])
+
+        # Pre-populare date pentru editare
+        if self.user_data:
+            self.username_entry.insert(0, self.user_data.get('username') or '')
+            self.username_entry.config(state=tk.DISABLED) # Nu permitem schimbarea username-ului
+            self.fullname_entry.insert(0, self.user_data.get('nume_complet') or '')
+            
+            # Pre-selectare roluri
+            for i, role in enumerate(self.all_roles):
+                if role['id'] in self.user_data.get('role_ids', set()):
+                    self.roles_listbox.selection_set(i)
+            
+            # Pre-selectare conturi
+            for i, acc in enumerate(self.all_accounts):
+                if acc['id_cont'] in self.user_data.get('account_ids', set()):
+                    self.accounts_listbox.selection_set(i)
+
+        self.db_handler.conn.commit()
+        return self.username_entry
+
+    def validate(self):
+        username = self.username_entry.get().strip()
+        if not username:
+            messagebox.showwarning("Validare eșuată", "Numele de utilizator este obligatoriu.", parent=self)
+            return False
+
+        # Verificăm unicitatea username-ului doar la creare
+        if not self.user_id:
+            if not self.password_entry.get():
+                messagebox.showwarning("Validare eșuată", "Parola este obligatorie la crearea unui utilizator nou.", parent=self)
+                return False
+            
+            existing_user = self.db_handler.fetch_scalar("SELECT id FROM utilizatori WHERE username = %s", (username,))
+            if existing_user:
+                messagebox.showwarning("Validare eșuată", "Acest nume de utilizator există deja.", parent=self)
+                return False
+        
+        # --- BLOC NOU DE VERIFICARE PENTRU ULTIMUL ADMINISTRATOR ---
+        # Acest bloc se execută doar la editarea unui utilizator existent.
+        if self.user_id:
+            # Verificăm dacă utilizatorul pe care îl edităm este administrator
+            is_currently_admin = False
+            admin_role_id = None
+            for role in self.all_roles: # self.all_roles este populat deja în metoda `body`
+                if role['nume_rol'] == 'Administrator':
+                    admin_role_id = role['id']
+                    # Verificăm dacă ID-ul rolului de admin se află printre rolurile originale ale utilizatorului
+                    if admin_role_id in self.user_data.get('role_ids', set()):
+                        is_currently_admin = True
+                    break
+
+            # Dacă este admin, continuăm cu verificările suplimentare
+            if is_currently_admin:
+                admin_count = self.db_handler.count_active_admins()
+                # Dacă este singurul administrator activ...
+                if admin_count <= 1:
+                    # Verificăm dacă în noua selecție de roluri se mai regăsește rolul de Administrator
+                    selected_indices = self.roles_listbox.curselection()
+                    new_selected_role_ids = {self.all_roles[i]['id'] for i in selected_indices}
+                    
+                    if admin_role_id not in new_selected_role_ids:
+                        messagebox.showerror(
+                            "Operațiune Nepermisă",
+                            "Nu puteți elimina rolul de 'Administrator' de la singurul cont de administrator activ.\n\n"
+                            "Pentru a face această modificare, trebuie mai întâi să acordați drepturi de administrator unui alt utilizator.",
+                            parent=self
+                        )
+                        return False # Blocăm salvarea
+        # --- SFÂRȘIT BLOC NOU DE VERIFICARE ---
+
+        return True
+
+    def apply(self):
+        # Pasul 1: Colectarea datelor din formular
+        username = self.username_entry.get().strip()
+        fullname = self.fullname_entry.get().strip() or None
+        password = self.password_entry.get()
+        
+        selected_role_indices = self.roles_listbox.curselection()
+        selected_role_ids = [self.all_roles[i]['id'] for i in selected_role_indices]
+
+        selected_account_indices = self.accounts_listbox.curselection()
+        selected_account_ids = [self.all_accounts[i]['id_cont'] for i in selected_account_indices]
+
+        cursor = None
+        try:
+            # --- BLOC NOU DE CORECȚIE ---
+            # Dacă o tranzacție este deja activă (de la pasul de validare),
+            # o comitem. Este o operațiune sigură, deoarece a fost doar o citire.
+            if self.db_handler.conn.in_transaction:
+                self.db_handler.conn.commit()
+            # --- SFÂRȘIT BLOC NOU DE CORECȚIE ---
+            
+            # Acum putem porni în siguranță tranzacția pentru scriere
+            self.db_handler.conn.start_transaction()
+            cursor = self.db_handler.conn.cursor()
+            
+            # Pasul 3: Executarea operațiunilor SQL (Modificare sau Adăugare)
+            if self.user_id: 
+                # Logică de MODIFICARE ...
+                if password:
+                    salt, pass_hash = auth_handler.hash_parola(password)
+                    cursor.execute("UPDATE utilizatori SET nume_complet = %s, parola_hash = %s, salt = %s WHERE id = %s",
+                                   (fullname, pass_hash, salt, self.user_id))
+                else:
+                    cursor.execute("UPDATE utilizatori SET nume_complet = %s WHERE id = %s", (fullname, self.user_id))
+
+                cursor.execute("DELETE FROM utilizatori_roluri WHERE id_utilizator = %s", (self.user_id,))
+                if selected_role_ids:
+                    role_values = [(self.user_id, role_id) for role_id in selected_role_ids]
+                    cursor.executemany("INSERT INTO utilizatori_roluri (id_utilizator, id_rol) VALUES (%s, %s)", role_values)
+
+                cursor.execute("DELETE FROM utilizatori_conturi_permise WHERE id_utilizator = %s", (self.user_id,))
+                if selected_account_ids:
+                    account_values = [(self.user_id, acc_id) for acc_id in selected_account_ids]
+                    cursor.executemany("INSERT INTO utilizatori_conturi_permise (id_utilizator, id_cont) VALUES (%s, %s)", account_values)
+                
+            else: 
+                # Logică de ADĂUGARE ...
+                salt, pass_hash = auth_handler.hash_parola(password)
+                cursor.execute("INSERT INTO utilizatori (username, nume_complet, parola_hash, salt) VALUES (%s, %s, %s, %s)",
+                               (username, fullname, pass_hash, salt))
+                new_user_id = cursor.lastrowid
+                
+                if selected_role_ids:
+                    role_values = [(new_user_id, role_id) for role_id in selected_role_ids]
+                    cursor.executemany("INSERT INTO utilizatori_roluri (id_utilizator, id_rol) VALUES (%s, %s)", role_values)
+                
+                if selected_account_ids:
+                    account_values = [(new_user_id, acc_id) for acc_id in selected_account_ids]
+                    cursor.executemany("INSERT INTO utilizatori_conturi_permise (id_utilizator, id_cont) VALUES (%s, %s)", account_values)
+
+            # Pasul 4: Finalizarea tranzacției de scriere
+            self.db_handler.conn.commit()
+            self.result = True
+
+        except mysql.connector.Error as e:
+            self.db_handler.conn.rollback()
+            messagebox.showerror("Eroare Bază de Date", f"Nu s-a putut salva utilizatorul:\n{e.msg}", parent=self)
+            self.result = False
+        finally:
+            if cursor:
+                cursor.close()
+
+class UserManagerDialog(simpledialog.Dialog):
+    """Dialog pentru gestionarea utilizatorilor aplicației."""
+    def __init__(self, parent, db_handler):
+        self.db_handler = db_handler
+        self.selected_user_id = None
+        self.selected_user_is_active = None
+        super().__init__(parent, "Gestionare Utilizatori")
+
+    def body(self, master):
+        self.tree_frame = ttk.Frame(master)
+        self.tree_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        cols = ("username", "nume_complet", "roluri", "stare")
+        self.users_tree = ttk.Treeview(self.tree_frame, columns=cols, show="headings", selectmode="browse")
+        
+        col_widths = {"username": 150, "nume_complet": 200, "roluri": 250, "stare": 80}
+        for col in cols:
+            self.users_tree.heading(col, text=col.replace("_", " ").capitalize())
+            self.users_tree.column(col, width=col_widths.get(col, 150), anchor=tk.W)
+
+        self.users_tree.tag_configure('inactive', foreground='gray')
+        
+        self.users_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(self.tree_frame, orient=tk.VERTICAL, command=self.users_tree.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.users_tree.configure(yscrollcommand=scrollbar.set)
+        
+        self.users_tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        self.users_tree.bind("<Double-1>", lambda e: self._on_edit_user())
+
+        button_container = ttk.Frame(master)
+        button_container.pack(side=tk.BOTTOM, fill=tk.X, pady=(0,10), padx=10)
+        
+        self.add_button = ttk.Button(button_container, text="Adaugă Utilizator", command=self._on_add_user)
+        self.add_button.pack(side=tk.LEFT, padx=5)
+        
+        self.edit_button = ttk.Button(button_container, text="Modifică Selectat", command=self._on_edit_user, state=tk.DISABLED)
+        self.edit_button.pack(side=tk.LEFT, padx=5)
+        
+        self.toggle_status_button = ttk.Button(button_container, text="Activează/Dezactivează", command=self._on_toggle_status, state=tk.DISABLED)
+        self.toggle_status_button.pack(side=tk.LEFT, padx=5)
+
+        self.delete_button = ttk.Button(button_container, text="Șterge Utilizator", command=self._on_delete_user, state=tk.DISABLED)
+        self.delete_button.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(button_container, text="Închide", command=self.ok).pack(side=tk.RIGHT, padx=5)
+        
+        self.load_users()
+        return self.users_tree
+
+    def buttonbox(self):
+        pass # Suprascris pentru a nu afișa OK/Cancel default
+
+    def load_users(self):
+        for item in self.users_tree.get_children():
+            self.users_tree.delete(item)
+        
+        users_data = self.db_handler.get_all_users_with_roles() # Folosim noua metodă
+        if users_data:
+            for user in users_data:
+                stare = "Activ" if user['activ'] else "Inactiv"
+                tags = () if user['activ'] else ('inactive',)
+                values = (user['username'], user.get('nume_complet', ''), user.get('roluri', 'N/A'), stare)
+                self.users_tree.insert("", tk.END, iid=user['id'], values=values, tags=tags)
+        self._on_tree_select(None)
+
+    def _on_tree_select(self, event=None):
+        selected_items = self.users_tree.selection()
+        if selected_items:
+            self.selected_user_id = int(selected_items[0])
+            item_data = self.users_tree.item(selected_items[0])
+            self.selected_user_is_active = item_data['values'][3] == "Activ"
+
+            self.edit_button.config(state=tk.NORMAL)
+            # Nu permitem modificarea, dezactivarea sau ștergerea utilizatorului admin principal (ID 1)
+            if self.selected_user_id == 1:
+                self.toggle_status_button.config(state=tk.DISABLED, text="Dezactivează")
+                self.delete_button.config(state=tk.DISABLED)
+            else:
+                self.toggle_status_button.config(state=tk.NORMAL)
+                self.toggle_status_button.config(text="Dezactivează" if self.selected_user_is_active else "Activează")
+                self.delete_button.config(state=tk.NORMAL)
+        else:
+            self.selected_user_id = None
+            self.selected_user_is_active = None
+            self.edit_button.config(state=tk.DISABLED)
+            self.toggle_status_button.config(state=tk.DISABLED, text="Activează/Dezactivează")
+            self.delete_button.config(state=tk.DISABLED)
+
+    def _on_delete_user(self):
+        if not self.selected_user_id: return
+
+        # Preluăm datele utilizatorului selectat din Treeview
+        item_values = self.users_tree.item(self.selected_user_id)['values']
+        username = item_values[0]
+        roles_str = item_values[2]
+        is_admin = 'Administrator' in (roles_str or '')
+
+        # Verificăm dacă este ultimul administrator
+        if is_admin:
+            admin_count = self.db_handler.count_active_admins()
+            if admin_count <= 1:
+                messagebox.showerror("Operațiune Nepermisă", "Nu puteți șterge singurul cont de administrator activ.", parent=self)
+                return
+
+        # Cerem confirmare dublă pentru o acțiune distructivă
+        if messagebox.askyesno("Confirmare Ștergere", f"Sunteți absolut sigur că doriți să ștergeți PERMANENT utilizatorul '{username}'?\n\nAceastă acțiune nu poate fi anulată.", parent=self, icon='warning'):
+            success, message = self.db_handler.delete_user(self.selected_user_id)
+            if success:
+                messagebox.showinfo("Succes", message, parent=self)
+                self.load_users() # Reîmprospătăm lista
+            else:
+                messagebox.showerror("Eroare", message, parent=self)
+
+    def _on_add_user(self):
+        dialog = UserEditDialog(self, self.db_handler)
+        if dialog.result:
+            messagebox.showinfo("Succes", "Utilizatorul a fost adăugat.", parent=self)
+            self.load_users()
+    
+    def _on_edit_user(self):
+        if not self.selected_user_id: return
+        dialog = UserEditDialog(self, self.db_handler, user_id=self.selected_user_id)
+        if dialog.result:
+            messagebox.showinfo("Succes", "Utilizatorul a fost modificat.", parent=self)
+            self.load_users()
+
+    def _on_toggle_status(self):
+        if not self.selected_user_id: return
+
+        item_values = self.users_tree.item(self.selected_user_id)['values']
+        username = item_values[0]
+        roles_str = item_values[2]
+        is_admin = 'Administrator' in (roles_str or '')
+        action_text = "dezactivați" if self.selected_user_is_active else "activați"
+
+        # Verificarea de siguranță: se aplică doar la DEZACTIVAREA unui admin
+        if is_admin and self.selected_user_is_active:
+            admin_count = self.db_handler.count_active_admins()
+            if admin_count <= 1:
+                messagebox.showerror("Operațiune Nepermisă", "Nu puteți dezactiva singurul cont de administrator activ.", parent=self)
+                return
+
+        if messagebox.askyesno("Confirmare", f"Sunteți sigur că doriți să {action_text} utilizatorul '{username}'?", parent=self):
+            success, message = self.db_handler.toggle_user_status(self.selected_user_id)
+            if success:
+                self.load_users()
+            else:
+                messagebox.showerror("Eroare", message, parent=self)

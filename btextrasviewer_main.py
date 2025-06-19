@@ -23,7 +23,7 @@ from db_handler import DatabaseHandler, MariaDBConfigDialog # Corectat, db_handl
 import file_processing 
 from file_processing import extract_iban_from_mt940, threaded_import_worker, threaded_export_worker
 import ui_utils
-from ui_dialogs import AccountManagerDialog, AccountEditDialog, TransactionTypeManagerDialog, SMTPConfigDialog, BalanceReportConfigDialog, LoginDialog
+from ui_dialogs import AccountManagerDialog, AccountEditDialog, TransactionTypeManagerDialog, SMTPConfigDialog, BalanceReportConfigDialog, LoginDialog, UserManagerDialog
 
 # NOU: Importăm handler-ul de autentificare. Vom avea nevoie de el în pasul următor.
 import auth_handler
@@ -136,6 +136,10 @@ class BTViewerApp:
     # init_step2_connect, init_step2b_prompt_credentials, și init_step3_check_table
     # pot fi ȘTERSE din clasa BTViewerApp, deoarece logica lor a fost mutată
     # în secvența de pornire.
+
+    def manage_users(self):
+        """Deschide dialogul de gestionare a utilizatorilor."""
+        UserManagerDialog(self.master, self.db_handler)
 
     def configure_smtp(self):
         dialog = SMTPConfigDialog(self.master, initial_config=self.smtp_config)
@@ -539,22 +543,40 @@ class BTViewerApp:
         default_font_size = 10
         menubar = tk.Menu(self.master)
         self.master.config(menu=menubar)
+
+        # --- Meniul Fișier ---
         file_menu = tk.Menu(menubar, tearoff=0, font=(default_font_family, default_font_size))
         menubar.add_cascade(label="Fișier", menu=file_menu, font=(default_font_family, default_font_size))
-        file_menu.add_command(label="Configurează Conexiunea DB...", command=self.handle_db_config_from_menu)
-        file_menu.add_separator()
-        file_menu.add_command(label="Gestionare Conturi Bancare...", command=self.manage_accounts)
-        file_menu.add_separator()
-        file_menu.add_command(label="Gestionare Tipuri Tranzacții...", command=self.manage_transaction_types)
-        file_menu.add_separator()
-        file_menu.add_command(label="Configurează SMTP (Email)...", command=self.configure_smtp)
-        file_menu.add_separator()
+
+        # Opțiuni condiționate de permisiuni
+        if self.has_permission('manage_system_settings'):
+            file_menu.add_command(label="Configurează Conexiunea DB...", command=self.handle_db_config_from_menu)
+            file_menu.add_separator()
+        
+        if self.has_permission('manage_accounts'):
+            file_menu.add_command(label="Gestionare Conturi Bancare...", command=self.manage_accounts)
+            file_menu.add_separator()
+        
+        if self.has_permission('manage_system_settings'):
+            file_menu.add_command(label="Gestionare Tipuri Tranzacții...", command=self.manage_transaction_types)
+            file_menu.add_separator()
+            file_menu.add_command(label="Configurează SMTP (Email)...", command=self.configure_smtp)
+            file_menu.add_separator()
+
+        if self.has_permission('manage_users'):
+            file_menu.add_command(label="Gestionare Utilizatori...", command=self.manage_users)
+            file_menu.add_separator()
+
         file_menu.add_command(label="Ieșire", command=lambda: ui_utils.handle_app_exit(self, self.master))
+
+        # --- Meniul Rapoarte ---
         reports_menu = tk.Menu(menubar, tearoff=0, font=(default_font_family, default_font_size))
-        menubar.add_cascade(label="Rapoarte", menu=reports_menu, font=(default_font_family, default_font_size))
-        reports_menu.add_command(label="Analiză Flux de Numerar...", command=self.show_cash_flow_report)
-        reports_menu.add_command(label="Evoluție Sold Cont...", command=self.show_balance_report)
-        reports_menu.add_command(label="Analiză Detaliată Tranzacții...", command=self.show_transaction_analysis_report)
+        # Adăugăm meniul doar dacă utilizatorul are voie să vadă rapoarte
+        if self.has_permission('view_reports'):
+            menubar.add_cascade(label="Rapoarte", menu=reports_menu, font=(default_font_family, default_font_size))
+            reports_menu.add_command(label="Analiză Flux de Numerar...", command=self.show_cash_flow_report)
+            reports_menu.add_command(label="Evoluție Sold Cont...", command=self.show_balance_report)
+            reports_menu.add_command(label="Analiză Detaliată Tranzacții...", command=self.show_transaction_analysis_report)
     
     def _on_account_selected(self, event=None):
         if self._prevent_on_account_selected_trigger: return
@@ -1596,15 +1618,46 @@ class BTViewerApp:
             window_to_close.destroy()
 
     def _toggle_action_buttons(self, state_str):
-        final_state = tk.NORMAL if state_str == 'normal' else tk.DISABLED
-        if hasattr(self, 'action_buttons'):
+        # Starea de bază: 'normal' (dacă un cont e activ) sau 'disabled'
+        base_state = tk.NORMAL if state_str == 'normal' else tk.DISABLED
+
+        # Dicționar care mapează fiecare buton la permisiunea necesară
+        button_permissions = {
+            self.report_button: 'view_reports',
+            self.balance_report_button: 'view_reports',
+            self.analysis_button: 'view_reports',
+            self.export_button: 'export_data',
+            self.import_button: 'import_files'
+        }
+
+        # Dezactivăm combobox-ul de conturi dacă starea de bază este 'disabled'
+        if hasattr(self, 'account_selector_combo') and self.account_selector_combo.winfo_exists():
+            try:
+                account_combo_state = "readonly" if base_state == tk.NORMAL and self.accounts_list else "disabled"
+                self.account_selector_combo.config(state=account_combo_state)
+            except tk.TclError: pass
+
+        # Dacă starea de bază este 'disabled', dezactivăm toate butoanele de acțiune
+        if base_state == tk.DISABLED:
             for btn in self.action_buttons:
                 if isinstance(btn, (tk.Button, ttk.Button)) and btn.winfo_exists():
-                    try: btn.config(state=final_state)
+                    try: btn.config(state=tk.DISABLED)
                     except tk.TclError: pass
-        if hasattr(self, 'account_selector_combo') and self.account_selector_combo.winfo_exists():
-             try: self.account_selector_combo.config(state="readonly" if final_state == tk.NORMAL and self.accounts_list else "disabled")
-             except tk.TclError: pass
+            return
+
+        # Dacă starea de bază este 'normal', verificăm permisiunea pentru fiecare buton în parte
+        for btn, perm_key in button_permissions.items():
+            if isinstance(btn, (tk.Button, ttk.Button)) and btn.winfo_exists():
+                try:
+                    # Starea finală este 'normal' doar dacă și permisiunea este acordată
+                    final_state = tk.NORMAL if self.has_permission(perm_key) else tk.DISABLED
+                    btn.config(state=final_state)
+                except tk.TclError: pass
+        
+        # Butonul de resetare nu are nevoie de permisiuni speciale, doar de o stare de bază activă
+        if hasattr(self, 'reset_button') and self.reset_button.winfo_exists():
+            try: self.reset_button.config(state=base_state)
+            except tk.TclError: pass
 
     def export_to_excel(self):
         if not (self.db_handler and self.db_handler.is_connected() and self.active_account_id):
