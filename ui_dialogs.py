@@ -1005,25 +1005,38 @@ class UserManagerDialog(simpledialog.Dialog):
             self.delete_button.config(state=tk.DISABLED)
 
     def _on_delete_user(self):
-        if not self.selected_user_id: return
+        if not self.selected_user_id:
+            return
 
-        # Preluăm datele utilizatorului selectat din Treeview
-        item_values = self.users_tree.item(self.selected_user_id)['values']
-        username = item_values[0]
-        roles_str = item_values[2]
-        is_admin = 'Administrator' in (roles_str or '')
+        # --- BLOC DE COD CORECTAT ȘI ADĂUGAT ---
+        # Preluăm datele utilizatorului selectat direct din Treeview
+        # pentru a avea acces la 'username' pentru mesajul de confirmare.
+        try:
+            item_values = self.users_tree.item(self.selected_user_id)['values']
+            username = item_values[0]
+            roles_str = item_values[2]
+            is_admin = 'Administrator' in (roles_str or '')
+        except (IndexError, tk.TclError):
+            # Fallback în caz că datele din treeview nu pot fi citite
+            messagebox.showerror("Eroare", "Nu s-au putut prelua detaliile utilizatorului selectat.", parent=self)
+            return
+        # --- SFÂRȘIT BLOC CORECTAT ---
 
-        # Verificăm dacă este ultimul administrator
+        # Verificăm dacă este ultimul administrator activ
         if is_admin:
             admin_count = self.db_handler.count_active_admins()
             if admin_count <= 1:
                 messagebox.showerror("Operațiune Nepermisă", "Nu puteți șterge singurul cont de administrator activ.", parent=self)
                 return
 
-        # Cerem confirmare dublă pentru o acțiune distructivă
+        # Acum, variabila 'username' există și poate fi folosită în siguranță
         if messagebox.askyesno("Confirmare Ștergere", f"Sunteți absolut sigur că doriți să ștergeți PERMANENT utilizatorul '{username}'?\n\nAceastă acțiune nu poate fi anulată.", parent=self, icon='warning'):
             success, message = self.db_handler.delete_user(self.selected_user_id)
             if success:
+                # Jurnalizare acțiune
+                log_details = f"Utilizatorul '{username}' (ID: {self.selected_user_id}) a fost șters."
+                self.db_handler.log_action(self.current_user['id'], self.current_user['username'], "Ștergere utilizator", log_details)
+
                 messagebox.showinfo("Succes", message, parent=self)
                 self.load_users() # Reîmprospătăm lista
             else:
@@ -1069,20 +1082,5 @@ class UserManagerDialog(simpledialog.Dialog):
                 self.db_handler.log_action(self.current_user['id'], self.current_user['username'], log_action_text, log_details)
 
                 self.load_users()
-            else:
-                messagebox.showerror("Eroare", message, parent=self)
-
-    def _on_delete_user(self):
-        # ... codul existent pentru verificări ...
-
-        if messagebox.askyesno("Confirmare Ștergere", f"Sunteți absolut sigur că doriți să ștergeți permanent utilizatorul '{username}'?\n\nAceastă acțiune nu poate fi anulată.", parent=self, icon='warning'):
-            success, message = self.db_handler.delete_user(self.selected_user_id)
-            if success:
-                # Jurnalizare acțiune
-                log_details = f"Utilizatorul '{username}' (ID: {self.selected_user_id}) a fost șters."
-                self.db_handler.log_action(self.current_user['id'], self.current_user['username'], "Ștergere utilizator", log_details)
-
-                messagebox.showinfo("Succes", message, parent=self)
-                self.load_users() # Reîmprospătăm lista
             else:
                 messagebox.showerror("Eroare", message, parent=self)

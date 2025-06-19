@@ -227,6 +227,28 @@ class BTViewerApp:
             report_config['visible_tx_codes'] = self.visible_tx_codes
             BalanceEvolutionReportDialog(self.master, self.db_handler, self.smtp_config, report_config)
 
+    def _populate_audit_log_tab(self):
+        """Populează tab-ul Jurnal Acțiuni cu date din baza de date."""
+        # Verificăm dacă tree-ul există (a fost creat pe baza permisiunii)
+        if not hasattr(self, 'audit_log_tree'):
+            return
+
+        for item in self.audit_log_tree.get_children():
+            self.audit_log_tree.delete(item)
+
+        log_entries = self.db_handler.get_audit_log_entries()
+        if log_entries:
+            for entry in log_entries:
+                # Formatăm data pentru o afișare mai prietenoasă
+                timestamp_str = entry['timestamp'].strftime('%d-%m-%Y %H:%M:%S') if entry.get('timestamp') else ''
+                values = (
+                    timestamp_str,
+                    entry.get('username', 'N/A'),
+                    entry.get('actiune', ''),
+                    entry.get('detalii', '')
+                )
+                self.audit_log_tree.insert("", "end", values=values)
+
     def show_transaction_analysis_report(self):
         if not (self.db_handler and self.db_handler.is_connected()):
             messagebox.showwarning("Fără Conexiune", "Vă rugăm asigurați o conexiune la baza de date.", parent=self.master)
@@ -292,6 +314,9 @@ class BTViewerApp:
 
         if self.master.winfo_exists():
             self.master.after(300, lambda: self._schedule_ui_population_steps(self.config, "(initial setup)"))
+
+            # Populăm și jurnalul de acțiuni la pornire
+            self._populate_audit_log_tab()
 
     def setup_ui(self):
         default_font_size = 10
@@ -429,6 +454,33 @@ class BTViewerApp:
         self.history_tree.configure(yscrollcommand=history_scrollbar.set)
         self.history_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         history_scrollbar.pack(side=tk.RIGHT, fill="y")
+
+        # Verificăm dacă utilizatorul are permisiunea de a vedea jurnalul
+        if self.has_permission('view_audit_log'):
+            audit_log_tab = ttk.Frame(main_content_notebook)
+            main_content_notebook.add(audit_log_tab, text=" Jurnal Acțiuni ")
+            
+            # Creăm un Treeview pentru a afișa jurnalul
+            audit_cols = ("timestamp", "username", "actiune", "detalii")
+            self.audit_log_tree = ttk.Treeview(audit_log_tab, columns=audit_cols, show="headings")
+            
+            # Setăm antetele și dimensiunile coloanelor
+            self.audit_log_tree.heading("timestamp", text="Dată și Oră")
+            self.audit_log_tree.heading("username", text="Utilizator")
+            self.audit_log_tree.heading("actiune", text="Acțiune")
+            self.audit_log_tree.heading("detalii", text="Detalii")
+            
+            self.audit_log_tree.column("timestamp", width=160, anchor="w")
+            self.audit_log_tree.column("username", width=120, anchor="w")
+            self.audit_log_tree.column("actiune", width=180, anchor="w")
+            self.audit_log_tree.column("detalii", width=400, anchor="w")
+            
+            # Adăugăm scrollbar
+            audit_scrollbar = ttk.Scrollbar(audit_log_tab, orient="vertical", command=self.audit_log_tree.yview)
+            self.audit_log_tree.configure(yscrollcommand=audit_scrollbar.set)
+            
+            self.audit_log_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            audit_scrollbar.pack(side=tk.RIGHT, fill="y")
         
         footer_frame = tk.Frame(self.master, bd=1, relief=tk.SUNKEN)
         footer_frame.pack(side=tk.BOTTOM, fill=tk.X)
@@ -1010,6 +1062,11 @@ class BTViewerApp:
                 processed_target_id = batch_info.get('target_id')
                 processed_target_name = next((acc['nume_cont'] for acc in self.accounts_list if acc['id_cont'] == processed_target_id), f"ID {processed_target_id}")
                 
+                if self.db_handler:
+                    log_details = (f"Import în contul '{processed_target_name}'. Fișiere procesate: {num_files_in_batch}. "
+                                   f"Tranzacții noi: {inserted}, Ignorate (duplicate): {ignored}.")
+                    self.db_handler.log_action(self.current_user['id'], self.current_user['username'], "Import fișiere MT940", log_details)
+
                 final_batch_message = (f"Lot pentru contul '{processed_target_name}' finalizat.\n\n"
                                        f"Fișiere procesate: {num_files_in_batch}\n"
                                        f"Tranzacții noi importate: {inserted}\n"
@@ -1017,15 +1074,10 @@ class BTViewerApp:
                 
                 self._finalize_background_task(final_batch_message, success=True, operation_type=operation_type)
 
+                # --- BLOCUL PROBLEMATIC A FOST ÎNLUCUIT CU ACEST BLOC SIMPLIFICAT ---
                 if processed_target_id is not None:
-                    if self.db_handler: self.db_handler.close_connection()
-                    if not self.connect_to_db():
-                        if self.master.winfo_exists(): 
-                            messagebox.showerror("Eroare Conexiune", "Nu s-a putut reconecta la DB după import.", parent=self.master)
-                        self.import_batch_queue = []
-                        if self.master.winfo_exists(): self.master.after(100, self._process_next_import_batch);
-                        return
-
+                    # Dacă lotul procesat a fost pentru un alt cont decât cel activ,
+                    # comutăm pe contul nou importat pentru a vedea direct rezultatele.
                     if self.active_account_id != processed_target_id:
                         target_acc_obj = next((acc for acc in self.accounts_list if acc['id_cont'] == processed_target_id), None)
                         if target_acc_obj:
@@ -1035,10 +1087,10 @@ class BTViewerApp:
                             config_management.save_app_config(self)
                             self._prevent_on_account_selected_trigger = False
                     
+                    # Reîmprospătăm TOATĂ interfața pentru a reflecta noile date
                     self.refresh_ui_for_account_change()
 
-                    if self.master.winfo_exists():
-                        self.master.update_idletasks()
+                # --- SFÂRȘIT BLOC CORECTAT ---
                 
                 if self.master.winfo_exists():
                     self.master.after(100, self._process_next_import_batch)
@@ -1197,60 +1249,83 @@ class BTViewerApp:
             self.sold_label.config(text=sold_str, foreground="black" if sold == 0 else ("#006400" if sold > 0 else "#8B0000"))
 
     def prompt_for_mariadb_credentials(self):
-        success = False
-        dialog = MariaDBConfigDialog(self.master, initial_config={
-            'host': self.db_host, 'port': self.db_port, 'database': self.db_name,
-            'user': self.db_user, 'password': self.db_password
-        })
-        creds = dialog.result
+        """
+        Deschide dialogul de configurare, testează noile credențiale și le returnează dacă sunt valide.
+        Returnează dicționarul cu credențiale la succes, sau None la eșec/anulare.
+        """
+        # Obține configurația curentă pentru a o pre-popula în dialog
+        current_creds = self.db_handler.db_credentials if (self.db_handler and self.db_handler.db_credentials) else {}
+        dialog = MariaDBConfigDialog(self.master, initial_config=current_creds)
         
-        if not self.master.winfo_exists(): return False
-        self.master.update_idletasks() 
+        new_creds = dialog.result
+        if not new_creds:
+            return None # Utilizatorul a anulat
 
-        if creds:
-            if not all([creds["host"], creds["port"], creds["database"], creds["user"]]):
-                if self.master.winfo_exists(): messagebox.showerror("Date Incomplete", "Toate câmpurile (excepție parola) sunt obligatorii.", parent=self.master)
-            else:
-                self.db_host, self.db_port, self.db_name, self.db_user, self.db_password = \
-                    creds["host"].strip(), creds["port"], creds["database"].strip(), creds["user"].strip(), creds["password"]
-                
-                if self.connect_to_db():
-                    config_management.save_app_config(self)
-                    success = True
-        return success
+        if not all([new_creds.get("host"), new_creds.get("port"), new_creds.get("database"), new_creds.get("user")]):
+            messagebox.showerror("Date Incomplete", "Câmpurile Host, Port, Nume Bază Date și Utilizator sunt obligatorii.", parent=self.master)
+            return None
+
+        # Creează un handler temporar DOAR pentru a testa conexiunea
+        temp_db_handler = DatabaseHandler(db_credentials=new_creds, app_master_ref=self.master)
+        
+        if temp_db_handler.connect():
+            # Conexiune reușită, închidem conexiunea temporară și returnăm credențialele
+            temp_db_handler.close_connection()
+            return new_creds
+        else:
+            # Conexiunea a eșuat, mesajul de eroare este deja afișat de .connect()
+            return None
 
     def handle_db_config_from_menu(self):
+        # 1. Închidem orice conexiune existentă
         if self.db_handler:
             self.db_handler.close_connection()
-            self.db_handler = None
-        
-        prompt_successful = self.prompt_for_mariadb_credentials()
+
+        # 2. Obținem și validăm noile credențiale
+        new_credentials = self.prompt_for_mariadb_credentials()
         
         if not self.master.winfo_exists(): return
-        self.master.update_idletasks()
 
-        if prompt_successful:
-            if hasattr(self, 'status_label') and self.status_label.winfo_exists(): self.status_label.config(text="Actualizare după reconfigurare DB...")
+        if new_credentials:
+            # 3. Reconectare și verificare schemă cu noile credențiale
+            self.status_label.config(text="Reconectare la DB și verificare schemă...")
             self.master.update_idletasks()
             
+            self.db_handler = DatabaseHandler(db_credentials=new_credentials, app_master_ref=self.master)
+            if not self.db_handler.connect() or not self.db_handler.check_and_setup_database_schema():
+                messagebox.showerror("Eroare Critică", "Nu s-a putut stabili o conexiune validă sau configura schema DB cu noile date.", parent=self.master)
+                self._toggle_action_buttons('disabled')
+                return
+
+            # 4. Salvăm noua configurație validă
+            config_management.save_app_config(self)
+
+            # 5. Resetăm starea internă a aplicației
+            self.status_label.config(text="Resetare și reîncărcare interfață...")
+            self.master.update_idletasks()
             self.active_account_id = None
             self.accounts_list = []
             self.account_combo_var.set("")
             self.total_transaction_count = 0
             self.nav_selected_year, self.nav_selected_month_index, self.nav_selected_day = None, 0, 0
             
+            # Curățăm treeview-urile
             if hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists():
                 for item in self.nav_tree.get_children(""): self.nav_tree.delete(item)
             if hasattr(self, 'tree') and self.tree.winfo_exists():
                 for item in self.tree.get_children(""): self.tree.delete(item)
-
-            self.master.after(10, self.init_step3_check_table) 
             
-            if self.master.winfo_exists(): messagebox.showinfo("Configurare Reușită", "Conexiunea la baza de date a fost actualizată.", parent=self.master)
-        else: 
-            if not (self.db_handler and self.db_handler.is_connected()):
-                if hasattr(self, 'status_label') and self.status_label.winfo_exists(): self.status_label.config(text="Configurare anulată/eșuată. Nicio conexiune DB.")
-                self._toggle_action_buttons('disabled')
+            # 6. Apelăm metoda corectă de populare a UI-ului
+            self.master.after(10, self.init_step4_populate_ui) # APEL CORECT
+            
+            messagebox.showinfo("Configurare Reușită", "Conexiunea la baza de date a fost actualizată cu succes.", parent=self.master)
+        else:
+            # Cazul în care utilizatorul a anulat sau credențialele au fost invalide
+            self.db_handler = None # Asigurăm că handler-ul este invalid
+            self.status_label.config(text="Configurare anulată/eșuată. Nicio conexiune DB.")
+            self._toggle_action_buttons('disabled')
+            self._populate_account_selector() # Golește combobox-ul de conturi
+            self.refresh_ui_for_account_change() # Golește restul UI-ului
 
     def _schedule_ui_population_steps(self, config_parser_for_filters, context_msg=""):
         if not self.master.winfo_exists(): return
@@ -1478,12 +1553,17 @@ class BTViewerApp:
         if self.db_handler and self.db_handler.is_connected() and self.active_account_id:
             query = "SELECT COUNT(*) FROM tranzactii WHERE id_cont_fk = %s"
             params = [self.active_account_id]
+            
+            # Logica a fost corectată aici
             if self.visible_tx_codes:
                 placeholders = ', '.join(['%s'] * len(self.visible_tx_codes))
-                query += f" AND cod_tranzactie IN ({placeholders})"
+                # 1. Numele coloanei a fost corectat
+                query += f" AND cod_tranzactie_fk IN ({placeholders})"
                 params.extend(self.visible_tx_codes)
-            else:
-                query += " AND 1=0"
+            # 2. Blocul 'else' a fost eliminat complet.
+            #    Dacă 'self.visible_tx_codes' este goală, condiția 'if' este falsă
+            #    și nu se adaugă niciun filtru suplimentar, ceea ce este corect.
+
             self.total_transaction_count = self.db_handler.fetch_scalar(query, tuple(params)) or 0
         else:
             self.total_transaction_count = 0
@@ -1721,7 +1801,9 @@ class BTViewerApp:
                 if self.master.winfo_exists(): self.master.after(100, self._check_export_progress)
             elif msg_type == "done": 
                 self._toggle_action_buttons('normal')
-                if self.master.winfo_exists(): self.master.after(10, lambda: self._finalize_export_ui(f"Datele au fost exportate cu succes în:\n{data}", True))
+                if self.master.winfo_exists():
+                    # Pasăm acum și calea fișierului (data) către funcția de finalizare
+                    self.master.after(10, lambda: self._finalize_export_ui(f"Datele au fost exportate cu succes în:\n{data}", True, file_path=data))
             elif msg_type == "error": 
                 self._toggle_action_buttons('normal')
                 if self.master.winfo_exists(): self.master.after(10, lambda: self._finalize_export_ui(data, False))
@@ -1735,7 +1817,7 @@ class BTViewerApp:
             if self.current_progress_win and self.current_progress_win.winfo_exists(): self.current_progress_win.destroy()
             self._toggle_action_buttons('normal')
 
-    def _finalize_export_ui(self, message, success):
+    def _finalize_export_ui(self, message, success, file_path=None):
         if hasattr(self, 'current_progress_win') and self.current_progress_win:
             try:
                 if self.current_progress_win.winfo_exists():
@@ -1746,8 +1828,16 @@ class BTViewerApp:
         self.current_progress_win, self.current_progress_bar, self.current_progress_status_label_widget, self.export_thread = None, None, None, None
         
         if self.master.winfo_exists():
-            if success: messagebox.showinfo("Export Finalizat", message, parent=self.master)
-            else: messagebox.showerror("Eroare la Export", message, parent=self.master)
+            if success:
+                # --- BLOC NOU ADAUGAT ---
+                if file_path and self.db_handler:
+                    active_account_name = self.account_combo_var.get()
+                    log_details = f"Export pentru contul '{active_account_name}' în fișierul '{os.path.basename(file_path)}'."
+                    self.db_handler.log_action(self.current_user['id'], self.current_user['username'], "Export Excel", log_details)
+                # --- SFÂRȘIT BLOC NOU ---
+                messagebox.showinfo("Export Finalizat", message, parent=self.master)
+            else:
+                messagebox.showerror("Eroare la Export", message, parent=self.master)
 
     def exit_app(self, message=None):
         if message and hasattr(self, 'master') and self.master.winfo_exists():

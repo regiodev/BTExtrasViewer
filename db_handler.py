@@ -175,6 +175,16 @@ class DatabaseHandler:
         self.db_credentials = db_credentials
         self.app_master_ref = app_master_ref
 
+    def get_audit_log_entries(self):
+        """Preia toate înregistrările din jurnalul de acțiuni, ordonate descrescător după data."""
+        if not self.is_connected(): return []
+        query = """
+            SELECT username, actiune, detalii, timestamp 
+            FROM jurnal_actiuni 
+            ORDER BY timestamp DESC;
+        """
+        return self.fetch_all_dict(query)
+
     def connect(self):
         if not self.db_credentials:
             logging.error("Credentiale DB lipsesc. Conectare eșuată.")

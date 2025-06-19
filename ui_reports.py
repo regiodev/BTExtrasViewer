@@ -133,45 +133,36 @@ class CashFlowReportDialog(tk.Toplevel):
             messagebox.showerror("Eroare Export PDF", f"A apărut o eroare la salvarea fișierului PDF:\n{e}", parent=self)
 
     def export_to_excel(self):
-        if not self.report_data:
+        if not self.current_report_data: # Folosim self.current_report_data
             messagebox.showwarning("Export Anulat", "Nu există date de exportat.", parent=self)
             return
-            
-        default_filename = f"Raport_Evolutie_Sold_{self.report_config['account_name'].replace(' ','_')}_{date.today().strftime('%Y%m%d')}.xlsx"
+
+        default_filename = f"Raport_CashFlow_{self.account_var.get()}_{date.today().strftime('%Y%m%d')}.xlsx"
         file_path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Fișiere Excel", "*.xlsx")], title="Salvează Raportul Excel", initialfile=default_filename)
         if not file_path: return
 
         try:
-            # --- MODIFICARE: Folosim cheia corectă 'sold_dupa_tranzactie' ---
-            df_data = [{'Perioada': row['data'].strftime('%d.%m.%Y'), 'Sold Final': float(row['sold_dupa_tranzactie'])} for row in self.report_data]
+            # Construim DataFrame-ul cu datele corecte
+            header_text = "Data" if self.current_report_granularity == 'daily' else "Perioada"
+            df_data = []
+            for row in self.current_report_data:
+                label = row['data'].strftime('%d.%m.%Y') if self.current_report_granularity == 'daily' else f"{calendar.month_name[row['luna']].capitalize()} {row['an']}"
+                intrari = float(row['total_intrari'])
+                iesiri = float(row['total_iesiri'])
+                df_data.append({
+                    header_text: label,
+                    'Total Intrări': intrari,
+                    'Total Ieșiri': iesiri,
+                    'Sold Net': intrari - iesiri
+                })
+
             df = pd.DataFrame(df_data)
-
+            # ... restul logicii de scriere în Excel (poate fi adaptată) ...
             with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
-                sheet_name = f"Evolutie Sold {self.report_config['account_name']}"[:31]
-                df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
-                ws = writer.sheets[sheet_name]
-                
-                title_font = ExcelFont(bold=True, size=14, name='Calibri'); header_font = ExcelFont(bold=True, color="FFFFFF", name='Calibri', size=11)
-                header_fill = PatternFill(start_color="007ACC", end_color="007ACC", fill_type="solid")
-                thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+                df.to_excel(writer, sheet_name="Cash Flow", index=False)
+                # Se pot adăuga stiluri similare cu celelalte rapoarte
 
-                ws.merge_cells('A1:B1'); title_cell = ws['A1']
-                title_cell.value = f"Raport Evoluție Sold: {self.report_config['account_name']}"
-                title_cell.font = title_font; title_cell.alignment = Alignment(horizontal='center')
-
-                for cell in ws[2]: cell.font = header_font; cell.fill = header_fill; cell.border = thin_border
-                ws.column_dimensions['A'].width = 20; ws.column_dimensions['B'].width = 20
-                for row_cells in ws.iter_rows(min_row=3, max_row=len(df)+2, min_col=1, max_col=2):
-                    for cell in row_cells:
-                        cell.border = thin_border
-                        if cell.column == 2: cell.number_format = '#,##0.00'
-                
-                img_buffer = io.BytesIO(); self.fig.savefig(img_buffer, format='png', dpi=200); img = OpenpyxlImage(img_buffer)
-                img.anchor = 'D2'; ws.add_image(img)
-            
             messagebox.showinfo("Succes", f"Raportul a fost salvat cu succes în:\n{file_path}", parent=self)
-        except KeyError as e:
-            messagebox.showerror("Eroare de Cheie", f"A apărut o eroare la pregătirea datelor pentru export. Cheie lipsă: {e}", parent=self)
         except Exception as e:
             messagebox.showerror("Eroare Export Excel", f"A apărut o eroare la salvarea fișierului:\n{e}", parent=self)
 
@@ -598,20 +589,6 @@ class BalanceEvolutionReportDialog(tk.Toplevel):
         self._update_chart()
 
     def _update_chart(self):
-        # --- BLOC NOU DE DEPANARE (în interiorul _update_chart) ---
-        print("\n" + "="*15 + " [DEBUG] Date primite de functia _update_chart " + "="*15)
-        if hasattr(self, 'report_data') and self.report_data:
-            print(f"Total puncte de date de desenat: {len(self.report_data)}")
-            # Găsim și afișăm punctul cu valoarea maximă care va fi desenat
-            max_point = max(self.report_data, key=lambda x: x['sold_dupa_tranzactie'])
-            print(f"Punctul MAXIM: Data: {max_point['data']}, Sold: {max_point['sold_dupa_tranzactie']:,.2f}")
-            print(f"Primul punct:   Data: {self.report_data[0]['data']}, Sold: {self.report_data[0]['sold_dupa_tranzactie']:,.2f}")
-            print(f"Ultimul punct:  Data: {self.report_data[-1]['data']}, Sold: {self.report_data[-1]['sold_dupa_tranzactie']:,.2f}")
-        else:
-            print("Functia _update_chart a primit un set de date gol (self.report_data).")
-        print("="*71 + "\n")
-        # --- SFÂRȘIT BLOC NOU ---
-
         self.ax.clear()
         if not self.report_data:
             self.ax.text(0.5, 0.5, 'Nicio dată de afișat pentru perioada selectată.', horizontalalignment='center', verticalalignment='center')
