@@ -106,14 +106,27 @@ def create_progress_window(master_ref, title, message):
 # Înlocuiți această funcție în file_processing.py
 
 def threaded_import_worker(app_instance, file_paths, q_ref, active_account_id_for_import):
-    logging.debug(f"DEBUG_THREAD: Pornit threaded_import_worker (v5 - Fără calcul sold). Cont țintă ID: {active_account_id_for_import}")
+    logging.debug(f"DEBUG_THREAD: Pornit threaded_import_worker. Cont țintă ID: {active_account_id_for_import}")
     inserted, ignored = 0, 0
     thread_conn_local = None
     try:
         if active_account_id_for_import is None:
             raise ValueError("ID-ul contului activ nu a fost furnizat pentru import.")
 
-        conn_params = { 'host': app_instance.db_host, 'port': app_instance.db_port, 'user': app_instance.db_user, 'password': app_instance.db_password, 'database': app_instance.db_name, 'charset': 'utf8mb4', 'collation': 'utf8mb4_unicode_ci', 'use_pure': True }
+        # --- BLOC MODIFICAT PENTRU A PRELUA CREDENȚIALELE CORECT ---
+        # Verificăm dacă handler-ul și credențialele există
+        if not (hasattr(app_instance, 'db_handler') and app_instance.db_handler.db_credentials):
+             raise ConnectionError("Credentialele DB nu sunt disponibile în instanța aplicației.")
+        
+        # Preluăm parametrii de conexiune din dicționarul standardizat
+        conn_params = app_instance.db_handler.db_credentials.copy()
+        conn_params.update({
+            'charset': 'utf8mb4',
+            'collation': 'utf8mb4_unicode_ci',
+            'use_pure': True
+        })
+        # --- SFÂRȘIT BLOC MODIFICAT ---
+
         thread_conn_local = mysql.connector.connect(**conn_params)
         cursor = thread_conn_local.cursor()
 
@@ -166,7 +179,6 @@ def threaded_import_worker(app_instance, file_paths, q_ref, active_account_id_fo
                 cursor.execute("SELECT 1 FROM tranzactii WHERE data=%s AND suma=%s AND tip=%s AND descriere=%s AND id_cont_fk=%s",
                                (date_obj.strftime('%Y-%m-%d'), amount, tx_type, full_descr, active_account_id_for_import))
                 if not cursor.fetchone():
-                    # Am eliminat complet `sold_dupa_tranzactie` din INSERT
                     sql_insert = ("INSERT INTO tranzactii (id_cont_fk, data, descriere, suma, tip, cod_tranzactie_fk, cif, beneficiar, factura, tid, rrn, pan) "
                                   "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)")
                     values = (active_account_id_for_import, date_obj.strftime('%Y-%m-%d'), full_descr, amount, 
@@ -184,9 +196,7 @@ def threaded_import_worker(app_instance, file_paths, q_ref, active_account_id_fo
 
     except Exception as e:
         error_message = f"O eroare a apărut în timpul importului:\n{type(e).__name__}: {e}"
-        logging.error(f"EROARE CRITICĂ ÎN THREAD-UL DE IMPORT: {e}")
-        import traceback
-        logging.error(..., exc_info=True)
+        logging.error(f"EROARE CRITICĂ ÎN THREAD-UL DE IMPORT: {e}", exc_info=True)
         if thread_conn_local:
             try: thread_conn_local.rollback()
             except: pass

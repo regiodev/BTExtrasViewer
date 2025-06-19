@@ -599,3 +599,93 @@ class BalanceReportConfigDialog(simpledialog.Dialog):
             "granularity": self.granularity_var.get(),
             "currency": selected_account.get('valuta', 'RON')
         }
+
+# Adăugați la începutul fișierului ui_dialogs.py
+import auth_handler
+
+# ... (celelalte clase de dialog rămân neschimbate) ...
+
+class LoginDialog(simpledialog.Dialog):
+    """Dialog modal pentru autentificarea utilizatorului."""
+    def __init__(self, parent, db_handler):
+        self.db_handler = db_handler
+        # self.result va fi setat cu datele utilizatorului la succes
+        super().__init__(parent, "Autentificare BTExtrasViewer")
+
+    def body(self, master):
+        # Configurează grila pentru a centra elementele
+        master.grid_columnconfigure(0, weight=1)
+        master.grid_columnconfigure(1, weight=1)
+
+        tk.Label(master, text="Nume utilizator:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
+        self.username_entry = tk.Entry(master, width=30)
+        self.username_entry.grid(row=0, column=1, padx=5, pady=5)
+
+        tk.Label(master, text="Parola:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
+        self.password_entry = tk.Entry(master, show="*", width=30)
+        self.password_entry.grid(row=1, column=1, padx=5, pady=5)
+
+        # Stocăm o referință la fereastra părinte pentru a o putea centra
+        self.parent = master.winfo_toplevel()
+        
+        # Centrarea ferestrei de dialog
+        self.parent.update_idletasks()
+        x = self.parent.winfo_rootx() + (self.parent.winfo_width() // 2) - (self.winfo_width() // 2)
+        y = self.parent.winfo_rooty() + (self.parent.winfo_height() // 2) - (self.winfo_height() // 2)
+        self.geometry(f"+{x}+{y}")
+
+        return self.username_entry # focus inițial
+
+    def validate(self):
+        username = self.username_entry.get().strip()
+        password = self.password_entry.get()
+
+        if not username or not password:
+            messagebox.showwarning("Date lipsă", "Numele de utilizator și parola sunt obligatorii.", parent=self)
+            return False
+
+        # Preluăm datele utilizatorului din DB
+        user_db_data = self.db_handler.get_user_by_username(username)
+
+        if not user_db_data:
+            messagebox.showerror("Autentificare eșuată", "Nume de utilizator sau parolă incorectă.", parent=self)
+            return False
+
+        if not user_db_data.get('activ'):
+            messagebox.showerror("Cont inactiv", "Acest cont de utilizator este inactiv.", parent=self)
+            return False
+
+        # Verificăm parola folosind auth_handler
+        is_password_valid = auth_handler.verifica_parola(
+            parola_introdusa=password,
+            salt_hex=user_db_data['salt'],
+            hash_stocat_hex=user_db_data['parola_hash']
+        )
+
+        if not is_password_valid:
+            messagebox.showerror("Autentificare eșuată", "Nume de utilizator sau parolă incorectă.", parent=self)
+            return False
+
+        # Dacă parola este validă, pregătim datele pentru a fi returnate
+        user_id = user_db_data['id']
+        permissions = self.db_handler.get_user_permissions(user_id) #
+        allowed_accounts = self.db_handler.get_allowed_accounts_for_user(user_id) #
+
+        # Stocăm datele complete ale utilizatorului, care vor fi pasate aplicației principale
+        self.result = {
+            'id': user_id,
+            'username': username,
+            'permissions': permissions,
+            'allowed_accounts': allowed_accounts,
+            'has_all_permissions': 'all_permissions' in permissions
+        }
+        
+        # Înregistrăm acțiunea de login reușit în jurnal
+        self.db_handler.log_action(user_id, username, "Login reușit")
+
+        return True
+
+    def apply(self):
+        # Metoda `apply` este apelată automat de `simpledialog.Dialog` după ce `validate` returnează True.
+        # Rezultatul (self.result) a fost deja setat în `validate`.
+        pass

@@ -1,11 +1,14 @@
 # db_handler.py
 import mysql.connector
-from mysql.connector import errorcode # Import necesar pentru gestionarea erorilor specifice MySQL
+from mysql.connector import errorcode
 import logging
 import tkinter as tk
 from tkinter import simpledialog, messagebox
 
-# CONSTANTE SQL PENTRU NOUA STRUCTURĂ
+# Importăm handler-ul de autentificare pentru a putea crea utilizatorul admin
+import auth_handler
+
+# --- CONSTANTE SQL PENTRU STRUCTURA BAZEI DE DATE ---
 DB_STRUCTURE_CONTURI_BANCARE_MARIADB = """
 CREATE TABLE IF NOT EXISTS conturi_bancare (
     id_cont INT AUTO_INCREMENT PRIMARY KEY,
@@ -15,35 +18,17 @@ CREATE TABLE IF NOT EXISTS conturi_bancare (
     valuta VARCHAR(10) DEFAULT 'RON',
     data_creare TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     observatii_cont TEXT,
-    culoare_cont VARCHAR(7) DEFAULT '#FFFFFF',  -- NOU: Culoarea contului (ex: #RRGGBB), default alb
+    culoare_cont VARCHAR(7) DEFAULT '#FFFFFF',
     CONSTRAINT uq_nume_cont UNIQUE (nume_cont)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
-
-CREATE_TABLE_CONTURI_BANCARE = """
-CREATE TABLE IF NOT EXISTS conturi_bancare (
-    id_cont INT AUTO_INCREMENT PRIMARY KEY,
-    nume_cont VARCHAR(255) NOT NULL UNIQUE,
-    iban VARCHAR(34) NOT NULL UNIQUE,
-    culoare_cont VARCHAR(7),
-    este_default BOOLEAN DEFAULT FALSE
-) ENGINE=InnoDB;
+DB_STRUCTURE_TIPURI_TRANZACTII_MARIADB = """
+CREATE TABLE IF NOT EXISTS tipuri_tranzactii (
+    cod VARCHAR(4) PRIMARY KEY,
+    descriere_tip VARCHAR(255) NOT NULL,
+    este_operational BOOLEAN DEFAULT TRUE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
-
-# --- ADAUGARE: Definim structura pentru noua tabelă de istoric ---
-CREATE_TABLE_ISTORIC_IMPORTURI = """
-CREATE TABLE IF NOT EXISTS istoric_importuri (
-    id_import INT AUTO_INCREMENT PRIMARY KEY,
-    nume_fisier VARCHAR(255) NOT NULL,
-    data_import TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    tranzactii_procesate INT NOT NULL,
-    tranzactii_ignorate INT NOT NULL,
-    id_cont_fk INT NOT NULL,
-    FOREIGN KEY (id_cont_fk) REFERENCES conturi_bancare(id_cont) ON DELETE CASCADE
-) ENGINE=InnoDB;
-"""
-# --------------------------------------------------------------------
-
 DB_STRUCTURE_TRANZACTII_V2_MARIADB = """
 CREATE TABLE IF NOT EXISTS tranzactii (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -62,297 +47,265 @@ CREATE TABLE IF NOT EXISTS tranzactii (
     cont VARCHAR(100),
     sold_initial DECIMAL(15, 2),
     sold_final DECIMAL(15, 2),
-    sold_dupa_tranzactie DECIMAL(15, 2), -- NOU: Stochează soldul curent
+    sold_dupa_tranzactie DECIMAL(15, 2),
     observatii VARCHAR(300),
     CONSTRAINT fk_tranzactie_cont FOREIGN KEY (id_cont_fk) REFERENCES conturi_bancare(id_cont) ON DELETE RESTRICT,
     CONSTRAINT fk_tranzactie_tip FOREIGN KEY (cod_tranzactie_fk) REFERENCES tipuri_tranzactii(cod) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
-
-DB_ALTER_TRANZACTII_ADD_COLUMN_ID_CONT_FK_MARIADB = """
-ALTER TABLE tranzactii ADD COLUMN id_cont_fk INT NULL DEFAULT NULL AFTER id;
+CREATE_TABLE_ISTORIC_IMPORTURI = """
+CREATE TABLE IF NOT EXISTS istoric_importuri (
+    id_import INT AUTO_INCREMENT PRIMARY KEY,
+    nume_fisier VARCHAR(255) NOT NULL,
+    data_import TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    tranzactii_procesate INT NOT NULL,
+    tranzactii_ignorate INT NOT NULL,
+    id_cont_fk INT NOT NULL,
+    FOREIGN KEY (id_cont_fk) REFERENCES conturi_bancare(id_cont) ON DELETE CASCADE
+) ENGINE=InnoDB;
 """
-DB_STRUCTURE_TIPURI_TRANZACTII_MARIADB = """
-CREATE TABLE IF NOT EXISTS tipuri_tranzactii (
-    cod VARCHAR(4) PRIMARY KEY,
-    descriere_tip VARCHAR(255) NOT NULL,
-    este_operational BOOLEAN DEFAULT TRUE
+
+DB_STRUCTURE_UTILIZATORI = """
+CREATE TABLE IF NOT EXISTS utilizatori (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(50) NOT NULL UNIQUE,
+    parola_hash VARCHAR(256) NOT NULL,
+    salt VARCHAR(64) NOT NULL,
+    nume_complet VARCHAR(100),
+    activ BOOLEAN DEFAULT TRUE,
+    data_creare TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+"""
+DB_STRUCTURE_ROLURI = """
+CREATE TABLE IF NOT EXISTS roluri (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nume_rol VARCHAR(50) NOT NULL UNIQUE,
+    descriere TEXT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+"""
+DB_STRUCTURE_UTILIZATORI_ROLURI = """
+CREATE TABLE IF NOT EXISTS utilizatori_roluri (
+    id_utilizator INT,
+    id_rol INT,
+    PRIMARY KEY (id_utilizator, id_rol),
+    FOREIGN KEY (id_utilizator) REFERENCES utilizatori(id) ON DELETE CASCADE,
+    FOREIGN KEY (id_rol) REFERENCES roluri(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+"""
+DB_STRUCTURE_ROLURI_PERMISIUNI = """
+CREATE TABLE IF NOT EXISTS roluri_permisiuni (
+    id_rol INT,
+    cheie_permisiune VARCHAR(100),
+    PRIMARY KEY (id_rol, cheie_permisiune),
+    FOREIGN KEY (id_rol) REFERENCES roluri(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+"""
+DB_STRUCTURE_UTILIZATORI_CONTURI = """
+CREATE TABLE IF NOT EXISTS utilizatori_conturi_permise (
+    id_utilizator INT,
+    id_cont INT,
+    PRIMARY KEY (id_utilizator, id_cont),
+    FOREIGN KEY (id_utilizator) REFERENCES utilizatori(id) ON DELETE CASCADE,
+    FOREIGN KEY (id_cont) REFERENCES conturi_bancare(id_cont) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+"""
+DB_STRUCTURE_JURNAL_ACTIUNI = """
+CREATE TABLE IF NOT EXISTS jurnal_actiuni (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    id_utilizator INT,
+    username VARCHAR(50),
+    actiune VARCHAR(255) NOT NULL,
+    detalii TEXT,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (id_utilizator) REFERENCES utilizatori(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
 
 class MariaDBConfigDialog(simpledialog.Dialog):
-    def __init__(self, parent, title=None, initial_host=None, initial_port=None,
-                 initial_dbname=None, initial_user=None, initial_password=None):
-        self.initial_host = initial_host
-        self.initial_port = initial_port
-        self.initial_dbname = initial_dbname
-        self.initial_user = initial_user
-        self.initial_password = initial_password
-        super().__init__(parent, title)
+    def __init__(self, parent, title=None, initial_config=None):
+        self.initial_config = initial_config or {}
+        # Am eliminat parametrii individuali și folosim un singur dicționar
+        super().__init__(parent, title or "Configurare Conexiune MariaDB")
 
     def body(self, master):
         tk.Label(master, text="Host (IP NAS):").grid(row=0, sticky=tk.W, pady=2)
         self.host_entry = tk.Entry(master, width=30)
         self.host_entry.grid(row=0, column=1, pady=2)
-        if self.initial_host: self.host_entry.insert(0, self.initial_host)
+        self.host_entry.insert(0, self.initial_config.get('host', '')) # Folosim cheia 'host'
 
         tk.Label(master, text="Port:").grid(row=1, sticky=tk.W, pady=2)
         self.port_entry = tk.Entry(master, width=30)
         self.port_entry.grid(row=1, column=1, pady=2)
-        self.port_entry.insert(0, str(self.initial_port or "3306"))
+        self.port_entry.insert(0, self.initial_config.get('port', '3306'))
 
         tk.Label(master, text="Nume Bază Date:").grid(row=2, sticky=tk.W, pady=2)
         self.dbname_entry = tk.Entry(master, width=30)
         self.dbname_entry.grid(row=2, column=1, pady=2)
-        if self.initial_dbname: self.dbname_entry.insert(0, self.initial_dbname)
+        self.dbname_entry.insert(0, self.initial_config.get('database', '')) # Folosim cheia 'database'
 
         tk.Label(master, text="Utilizator DB:").grid(row=3, sticky=tk.W, pady=2)
         self.user_entry = tk.Entry(master, width=30)
         self.user_entry.grid(row=3, column=1, pady=2)
-        if self.initial_user: self.user_entry.insert(0, self.initial_user)
+        self.user_entry.insert(0, self.initial_config.get('user', ''))
 
         tk.Label(master, text="Parolă DB:").grid(row=4, sticky=tk.W, pady=2)
         self.password_entry = tk.Entry(master, show="*", width=30)
         self.password_entry.grid(row=4, column=1, pady=2)
-        if self.initial_password: self.password_entry.insert(0, self.initial_password)
+        self.password_entry.insert(0, self.initial_config.get('password', ''))
         
-        return self.host_entry # Focus inițial
+        return self.host_entry
 
     def apply(self):
+        try:
+            port = int(self.port_entry.get())
+        except (ValueError, TypeError):
+            port = 3306
+            
         self.result = {
-            "host": self.host_entry.get(),
-            "port": self.port_entry.get(),
-            "dbname": self.dbname_entry.get(),
-            "user": self.user_entry.get(),
+            "host": self.host_entry.get().strip(),
+            "port": port,
+            "database": self.dbname_entry.get().strip(), # Folosim cheia 'database'
+            "user": self.user_entry.get().strip(),
             "password": self.password_entry.get()
         }
 
 class DatabaseHandler:
-    def __init__(self, db_host, db_port, db_name, db_user, db_password, app_master_ref=None):
-        self.db_host = db_host
-        self.db_port = int(db_port) if db_port else 3306 # Asigură că portul e int
-        self.db_name = db_name
-        self.db_user = db_user
-        self.db_password = db_password
+    def __init__(self, db_credentials=None, app_master_ref=None):
         self.conn = None
-        self.app_master_ref = app_master_ref # Pentru a afișa messagebox-uri din handler
+        self.db_credentials = db_credentials
+        self.app_master_ref = app_master_ref
 
-    def connect_to_db_internal(self):
-        # Închide orice conexiune veche înainte de a încerca una nouă, pentru o stare curată.
-        if self.conn and self.conn.is_connected():
-            try:
-                self.conn.close()
-            except Exception as e_close:
-                logging.debug(f"DEBUG_DB_HANDLER: Eroare la închiderea conexiunii DB existente: {e_close}")
-        self.conn = None # Resetăm conn
-
-        try:
-            # Verifică dacă toate credențialele necesare sunt prezente
-            if not all([self.db_host, self.db_port, self.db_name, self.db_user]):
-                if self.app_master_ref and self.app_master_ref.winfo_exists():
-                     messagebox.showerror("Date Conexiune Lipsă", "Host, port, nume DB și utilizator sunt obligatorii.", parent=self.app_master_ref)
-                return False
-
-            logging.debug("DEBUG_DB_HANDLER: Pregătire pentru apelul mysql.connector.connect() cu use_pure=True...")
-            logging.debug(f"DEBUG_DB_HANDLER: Detalii: host={self.db_host}, port={self.db_port}, user={self.db_user}, db={self.db_name}")
-
-            # Apelul de conectare la baza de date.
-            # 'use_pure=True' este crucial pentru a evita problemele cu driverele C.
-            self.conn = mysql.connector.connect(
-                host=self.db_host,
-                port=self.db_port,
-                user=self.db_user,
-                password=self.db_password,
-                database=self.db_name,
-                charset='utf8mb4',
-                collation='utf8mb4_unicode_ci',
-                connect_timeout=10, # Adaugă un timeout pentru conectare
-                use_pure=True      # Forțează implementarea pur Python
-            )
-            
-            logging.debug("DEBUG_DB_HANDLER: Apelul mysql.connector.connect() s-a finalizat cu succes.")
-            return self.is_connected()
-        
-        except mysql.connector.Error as err:
-            # Gestionează erorile specifice de conectare MySQL
-            error_message = f"Eroare MySQL {err.errno}:\n{err.msg}"
-            if err.errno == errorcode.ER_ACCESS_DENIED_ERROR:
-                error_message = "Acces refuzat. Verificați utilizatorul și parola."
-            elif err.errno == errorcode.ER_BAD_DB_ERROR:
-                error_message = f"Baza de date '{self.db_name}' nu există."
-            elif err.errno in [errorcode.CR_CONN_HOST_ERROR, errorcode.CR_CONNECTION_ERROR]:
-                 error_message = f"Nu se poate conecta la hostul DB '{self.db_host}:{self.db_port}'. Verificați adresa și firewall-ul."
-
-            if self.app_master_ref and self.app_master_ref.winfo_exists():
-                messagebox.showerror("Eroare Conexiune DB", error_message, parent=self.app_master_ref)
-            else:
-                logging.error(f"EROARE CONEXIUNE DB (fără UI): {error_message}")
-            self.conn = None
+    def connect(self):
+        if not self.db_credentials:
+            logging.error("Credentiale DB lipsesc. Conectare eșuată.")
             return False
-
-        except Exception as e: # Prinde orice altă eroare neașteptată
-            error_message_gen = f"Eroare neașteptată la conectarea la DB ({type(e).__name__}):\n{e}"
-            if self.app_master_ref and self.app_master_ref.winfo_exists():
-                 messagebox.showerror("Eroare Necunoscută Conexiune", error_message_gen, parent=self.app_master_ref)
-            else:
-                logging.error(f"EROARE NECUNOSCUTĂ CONEXIUNE (fără UI): {error_message_gen}")
+        try:
+            self.conn = mysql.connector.connect(**self.db_credentials, autocommit=False)
+            logging.info(f"Conectat cu succes la DB '{self.db_credentials.get('database')}' pe host '{self.db_credentials.get('host')}'.")
+            return True
+        except mysql.connector.Error as err:
+            logging.error(f"Eroare conectare la MariaDB: {err}")
             self.conn = None
+            if self.app_master_ref:
+                messagebox.showerror("Eroare Conexiune DB", f"Nu s-a putut conecta la serverul de baze de date:\n{err}", parent=self.app_master_ref)
             return False
 
     def close_connection(self):
         if self.conn and self.conn.is_connected():
-            try:
-                self.conn.close()
-                logging.debug("DEBUG_DB_HANDLER: Conexiune DB închisă.")
-            except Exception as e:
-                logging.error(f"Eroare la închiderea explicită a conexiunii DB: {e}")
-        self.conn = None
+            self.conn.close()
+            logging.info("Conexiune la baza de date închisă.")
 
     def is_connected(self):
-        try: # Adăugăm try-except pentru robustețe
-            return self.conn is not None and self.conn.is_connected()
-        except:
-            return False
+        return self.conn is not None and self.conn.is_connected()
 
-    def _table_exists(self, cursor, table_name):
-        try:
-            # Corecție: Se face înlocuirea înainte de f-string pentru a evita eroarea de sintaxă.
-            escaped_table_name = table_name.replace('_', '\\_') 
-            cursor.execute(f"SHOW TABLES LIKE '{escaped_table_name}'")
-            return cursor.fetchone() is not None
-        except mysql.connector.Error as e:
-            logging.error(f"Eroare la _table_exists pentru {table_name}: {e}")
-            return False
-
-
-    def _column_exists(self, cursor, table_name, column_name):
-        # Asigură-te că self.db_name este setat și valid
-        current_db_name = self.db_name
-        if not current_db_name and self.is_connected(): # Încearcă să obții DB curent dacă nu e setat
-            try:
-                cursor.execute("SELECT DATABASE()")
-                res = cursor.fetchone()
-                if res and res[0]: current_db_name = res[0]
-            except Exception as e_get_db:
-                logging.debug(f"DEBUG_DB_HANDLER: Nu s-a putut obține DB curent pentru _column_exists: {e_get_db}")
-
-        if not current_db_name:
-            logging.error(f"Atenție: Numele bazei de date nu este disponibil pentru _column_exists ({table_name}.{column_name}).")
-            return False
+    def check_and_setup_database_schema(self):
+        if not self.is_connected(): return False
         
-        query = """
-            SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = %s
-        """
-        try:
-            cursor.execute(query, (current_db_name, table_name, column_name))
-            return cursor.fetchone() is not None
-        except mysql.connector.Error as e:
-            logging.error(f"Eroare la verificarea coloanei {table_name}.{column_name} (DB: {current_db_name}): {e}")
-            return False
-            
-    def _foreign_key_exists(self, cursor, table_name, constraint_name):
-        current_db_name = self.db_name
-        if not current_db_name and self.is_connected():
-            try:
-                cursor.execute("SELECT DATABASE()")
-                res = cursor.fetchone()
-                if res and res[0]: current_db_name = res[0]
-            except: pass
-
-        if not current_db_name: 
-            logging.debug(f"DEBUG: _foreign_key_exists - db_name indisponibil pentru {table_name}.{constraint_name}")
-            return False
-
-        query = """
-            SELECT 1 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
-            WHERE CONSTRAINT_SCHEMA = %s AND TABLE_NAME = %s 
-            AND CONSTRAINT_NAME = %s AND CONSTRAINT_TYPE = 'FOREIGN KEY'
-        """
-        try:
-            cursor.execute(query, (current_db_name, table_name, constraint_name))
-            return cursor.fetchone() is not None
-        except mysql.connector.Error as e:
-            logging.error(f"Eroare la verificarea FK {constraint_name} pe {table_name} (DB: {current_db_name}): {e}")
-            return False
-
-    def check_and_setup_database_schema(self, app_instance_ref):
-        if not self.is_connected():
-            return False
-
-        master_ref = self.app_master_ref
+        logging.info("Verificare și configurare schemă bază de date...")
+        
+        all_tables_scripts = [
+            DB_STRUCTURE_CONTURI_BANCARE_MARIADB,
+            DB_STRUCTURE_TIPURI_TRANZACTII_MARIADB,
+            DB_STRUCTURE_TRANZACTII_V2_MARIADB, # Folosim V2
+            CREATE_TABLE_ISTORIC_IMPORTURI,
+            DB_STRUCTURE_UTILIZATORI,
+            DB_STRUCTURE_ROLURI,
+            DB_STRUCTURE_UTILIZATORI_ROLURI,
+            DB_STRUCTURE_ROLURI_PERMISIUNI,
+            DB_STRUCTURE_UTILIZATORI_CONTURI,
+            DB_STRUCTURE_JURNAL_ACTIUNI
+        ]
+        
         try:
             with self.conn.cursor() as cursor:
-                # 1. Tabela 'tipuri_tranzactii'
-                if not self._table_exists(cursor, 'tipuri_tranzactii'):
-                    logging.debug("DEBUG_SCHEMA: Se creează tabela 'tipuri_tranzactii'...")
-                    cursor.execute(DB_STRUCTURE_TIPURI_TRANZACTII_MARIADB)
-                    self.conn.commit()
-
-                # 2. Tabela 'conturi_bancare'
-                if not self._table_exists(cursor, 'conturi_bancare'):
-                    logging.debug("DEBUG_SCHEMA: Se creează tabela 'conturi_bancare'...")
-                    cursor.execute(DB_STRUCTURE_CONTURI_BANCARE_MARIADB)
-                    self.conn.commit()
-                else:
-                    if not self._column_exists(cursor, 'conturi_bancare', 'culoare_cont'):
-                        logging.debug("DEBUG_SCHEMA: Se adaugă coloana 'culoare_cont'...")
-                        cursor.execute("ALTER TABLE conturi_bancare ADD COLUMN culoare_cont VARCHAR(7) DEFAULT '#FFFFFF' AFTER observatii_cont;")
-                        self.conn.commit()
-
-                # 3. Tabela 'tranzactii'
-                if not self._table_exists(cursor, 'tranzactii'):
-                    logging.debug("DEBUG_SCHEMA: Se creează tabela 'tranzactii' (structură nouă)...")
-                    cursor.execute(DB_STRUCTURE_TRANZACTII_V2_MARIADB)
-                    self.conn.commit()
-                else:
-                    # Acest bloc se execută DOAR dacă tabela 'tranzactii' există deja
-                    logging.debug("DEBUG_SCHEMA: Tabela 'tranzactii' există. Se verifică structura...")
-                    
-                    if not self._column_exists(cursor, 'tranzactii', 'id_cont_fk'):
-                        cursor.execute(DB_ALTER_TRANZACTII_ADD_COLUMN_ID_CONT_FK_MARIADB)
-                        app_instance_ref.migration_needed_for_existing_transactions = True
-
-                    if not self._column_exists(cursor, 'tranzactii', 'cod_tranzactie_fk'):
-                        cursor.execute("ALTER TABLE tranzactii ADD COLUMN cod_tranzactie_fk VARCHAR(4) NULL DEFAULT NULL AFTER tip;")
-
-                    if not self._foreign_key_exists(cursor, 'tranzactii', 'fk_tranzactie_tip'):
-                        cursor.execute("ALTER TABLE tranzactii ADD CONSTRAINT fk_tranzactie_tip FOREIGN KEY (cod_tranzactie_fk) REFERENCES tipuri_tranzactii(cod) ON DELETE SET NULL;")
-
-                    if not self._column_exists(cursor, 'tranzactii', 'sold_initial'):
-                        cursor.execute("ALTER TABLE tranzactii ADD COLUMN sold_initial DECIMAL(15, 2) NULL AFTER cont;")
-                    
-                    if not self._column_exists(cursor, 'tranzactii', 'sold_final'):
-                        cursor.execute("ALTER TABLE tranzactii ADD COLUMN sold_final DECIMAL(15, 2) NULL AFTER sold_initial;")
-
-                    if not self._column_exists(cursor, 'tranzactii', 'sold_dupa_tranzactie'):
-                        cursor.execute("ALTER TABLE tranzactii ADD COLUMN sold_dupa_tranzactie DECIMAL(15, 2) NULL AFTER sold_final;")
-                    
-                    self.conn.commit()
-
+                for table_script in all_tables_scripts:
+                    cursor.execute(table_script)
+            self.conn.commit()
+            logging.info("Toate tabelele au fost verificate/create cu succes.")
+            self._seed_initial_data()
             return True
-
-        except Exception as e:
-            if master_ref and master_ref.winfo_exists():
-                messagebox.showerror("Eroare Schemă DB", f"O eroare neașteptată la schema DB:\n{e}", parent=master_ref)
+        except mysql.connector.Error as err:
+            logging.error(f"Eroare la crearea schemei DB: {err.msg}")
+            self.conn.rollback()
             return False
 
+    def _seed_initial_data(self):
+        if not self.is_connected(): return
+
+        try:
+            if self.fetch_scalar("SELECT COUNT(*) FROM roluri") == 0:
+                logging.info("Nu există roluri. Se inserează rolurile implicite...")
+                with self.conn.cursor() as cursor:
+                    cursor.execute("INSERT INTO roluri (nume_rol, descriere) VALUES ('Administrator', 'Acces total la toate funcționalitățile aplicației.')")
+                    id_rol_admin = cursor.lastrowid
+                    cursor.execute("INSERT INTO roluri_permisiuni (id_rol, cheie_permisiune) VALUES (%s, %s)", (id_rol_admin, 'all_permissions'))
+                self.conn.commit()
+                logging.info("Rolul 'Administrator' a fost creat.")
+
+            if self.fetch_scalar("SELECT COUNT(*) FROM utilizatori") == 0:
+                logging.info("Nu există utilizatori. Se creează utilizatorul 'admin' implicit...")
+                admin_user, admin_pass = 'admin', 'admin123'
+                salt, pass_hash = auth_handler.hash_parola(admin_pass)
+                with self.conn.cursor() as cursor:
+                    query_user = "INSERT INTO utilizatori (username, parola_hash, salt, nume_complet, activ) VALUES (%s, %s, %s, %s, %s)"
+                    cursor.execute(query_user, (admin_user, pass_hash, salt, 'Administrator Sistem', True))
+                    id_user_admin = cursor.lastrowid
+                    id_rol_admin = self.fetch_scalar("SELECT id FROM roluri WHERE nume_rol = 'Administrator'")
+                    if id_user_admin and id_rol_admin:
+                        query_role = "INSERT INTO utilizatori_roluri (id_utilizator, id_rol) VALUES (%s, %s)"
+                        cursor.execute(query_role, (id_user_admin, id_rol_admin))
+                self.conn.commit()
+                logging.warning(f"Utilizator 'admin' creat cu parola temporară: '{admin_pass}'")
+                if self.app_master_ref:
+                    messagebox.showinfo("Utilizator Implicit Creat", f"A fost creat un cont de administrator:\n\nUtilizator: {admin_user}\nParolă: {admin_pass}", parent=self.app_master_ref)
+        except mysql.connector.Error as err:
+            logging.error(f"Eroare la inserarea datelor inițiale (seed): {err.msg}")
+            self.conn.rollback()
+
+    # =========================================================================
+    # NOU: Metoda get_all_accounts a fost adăugată înapoi
+    # =========================================================================
     def get_all_accounts(self):
-        if not self.is_connected(): 
+        if not self.is_connected():
             logging.debug("DEBUG_DB_HANDLER: get_all_accounts - Fără conexiune DB")
             return []
         try:
-            # Asigură-te că 'culoare_cont' este inclus în SELECT
             accounts = self.fetch_all_dict(
                 "SELECT id_cont, nume_cont, iban, nume_banca, valuta, observatii_cont, culoare_cont "
                 "FROM conturi_bancare ORDER BY nume_cont ASC"
-            ) # Paranteza corectată aici
+            )
             return accounts if accounts else []
         except Exception as e:
-            logging.debug(f"DEBUG_DB_HANDLER: Eroare în get_all_accounts: {e}")
+            logging.error(f"Eroare în get_all_accounts: {e}")
             if self.app_master_ref and self.app_master_ref.winfo_exists():
                 messagebox.showerror("Eroare DB", f"Nu s-au putut prelua conturile bancare:\n{e}", parent=self.app_master_ref)
             return []
+    # =========================================================================
+
+    def get_user_by_username(self, username):
+        query = "SELECT id, username, parola_hash, salt, activ FROM utilizatori WHERE username = %s"
+        return self.fetch_one_dict(query, (username,))
+
+    def get_user_permissions(self, user_id):
+        query = """
+            SELECT DISTINCT rp.cheie_permisiune
+            FROM roluri_permisiuni rp
+            JOIN utilizatori_roluri ur ON rp.id_rol = ur.id_rol
+            WHERE ur.id_utilizator = %s
+        """
+        results = self.fetch_all_dict(query, (user_id,))
+        if any(p['cheie_permisiune'] == 'all_permissions' for p in results):
+            return ['all_permissions']
+        return [p['cheie_permisiune'] for p in results]
+
+    def get_allowed_accounts_for_user(self, user_id):
+        query = "SELECT id_cont FROM utilizatori_conturi_permise WHERE id_utilizator = %s"
+        results = self.fetch_all_dict(query, (user_id,))
+        return [acc['id_cont'] for acc in results]
+
+    def log_action(self, user_id, username, action, details=""):
+        query = "INSERT INTO jurnal_actiuni (id_utilizator, username, actiune, detalii) VALUES (%s, %s, %s, %s)"
+        self.execute_commit(query, (user_id, username, action, details))
 
     def fetch_all_dict(self, query, params=None):
         if not self.is_connected(): return []
@@ -361,16 +314,8 @@ class DatabaseHandler:
                 cursor.execute(query, params or ())
                 return cursor.fetchall()
         except mysql.connector.Error as e:
-            if self.app_master_ref and self.app_master_ref.winfo_exists():
-                messagebox.showerror("Eroare Preluare Date", f"Eroare SQL:\n{e.msg}", parent=self.app_master_ref)
-            else: logging.error(f"EROARE SQL (fără UI) în fetch_all_dict: {e.msg}")
+            logging.error(f"Eroare SQL la fetch_all_dict: {e.msg}")
             return []
-        except Exception as e_gen:
-            if self.app_master_ref and self.app_master_ref.winfo_exists():
-                messagebox.showerror("Eroare Preluare Date", f"Eroare generală:\n{e_gen}", parent=self.app_master_ref)
-            else: logging.error(f"EROARE GENERALA (fără UI) în fetch_all_dict: {e_gen}")
-            return []
-
 
     def fetch_one_dict(self, query, params=None):
         if not self.is_connected(): return None
@@ -379,30 +324,19 @@ class DatabaseHandler:
                 cursor.execute(query, params or ())
                 return cursor.fetchone()
         except mysql.connector.Error as e:
-            if self.app_master_ref and self.app_master_ref.winfo_exists():
-                messagebox.showerror("Eroare Preluare Rând", f"Eroare SQL:\n{e.msg}", parent=self.app_master_ref)
-            else: logging.error(f"EROARE SQL (fără UI) în fetch_one_dict: {e.msg}")
+            logging.error(f"Eroare SQL la fetch_one_dict: {e.msg}")
             return None
-        except Exception as e_gen:
-            if self.app_master_ref and self.app_master_ref.winfo_exists():
-                messagebox.showerror("Eroare Preluare Rând", f"Eroare generală:\n{e_gen}", parent=self.app_master_ref)
-            else: logging.error(f"EROARE GENERALA (fără UI) în fetch_one_dict: {e_gen}")
-            return None
-            
+
     def fetch_scalar(self, query, params=None):
         if not self.is_connected(): return None
         try:
-            with self.conn.cursor() as cursor: # Nu dictionary=True pentru fetch_scalar
+            with self.conn.cursor() as cursor:
                 cursor.execute(query, params or ())
                 result = cursor.fetchone()
-                return result[0] if result and len(result) > 0 else None
+            return result[0] if result and len(result) > 0 else None
         except mysql.connector.Error as e:
-            logging.error(f"Eroare SQL la fetch_scalar ({query[:50]}...): {e.msg}")
+            logging.error(f"Eroare SQL la fetch_scalar: {e.msg}")
             return None
-        except Exception as e_gen:
-             logging.error(f"Eroare generală la fetch_scalar ({query[:50]}...): {e_gen}")
-             return None
-
 
     def execute_commit(self, query, params=None):
         if not self.is_connected(): return False
@@ -412,13 +346,7 @@ class DatabaseHandler:
             self.conn.commit()
             return True
         except mysql.connector.Error as e:
-            if self.app_master_ref and self.app_master_ref.winfo_exists():
-                messagebox.showerror("Eroare Execuție Query", f"Eroare SQL la modificare date:\n{e.msg}", parent=self.app_master_ref)
-            else: logging.error(f"EROARE SQL (fără UI) în execute_commit: {e.msg}")
-            # Considerați self.conn.rollback() aici dacă este necesar, deși with context ar trebui să gestioneze
-            return False
-        except Exception as e_gen:
-            if self.app_master_ref and self.app_master_ref.winfo_exists():
-                messagebox.showerror("Eroare Execuție Query", f"Eroare generală la modificare date:\n{e_gen}", parent=self.app_master_ref)
-            else: logging.error(f"EROARE GENERALA (fără UI) în execute_commit: {e_gen}")
+            logging.error(f"EROARE SQL în execute_commit: {e.msg}")
+            if self.app_master_ref:
+                messagebox.showerror("Eroare Execuție Query", f"Eroare SQL: {e.msg}", parent=self.app_master_ref)
             return False

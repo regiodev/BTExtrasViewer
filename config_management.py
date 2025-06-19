@@ -15,7 +15,7 @@ if not os.path.exists(APP_DATA_DIR):
 CONFIG_FILE = os.path.join(APP_DATA_DIR, 'config.ini')
 
 def read_db_config_from_parser(config_parser_obj):
-    """Citește configurația DB dintr-un obiect ConfigParser deja încărcat."""
+    """Citește configurația DB și o returnează cu chei standardizate."""
     db_credentials = None
     if config_parser_obj.has_section('Database'):
         host = config_parser_obj.get('Database', 'db_host', fallback=None)
@@ -32,12 +32,13 @@ def read_db_config_from_parser(config_parser_obj):
                 port = int(port_str.strip())
             except ValueError:
                 port = 3306 # Port implicit
+            # Se returnează dicționarul cu cheile standardizate
             db_credentials = {
-                "db_host": host.strip(),
-                "db_port": port,
-                "db_name": name.strip(),
-                "db_user": user.strip(),
-                "db_password": password
+                "host": host.strip(),
+                "port": port,
+                "database": name.strip(),
+                "user": user.strip(),
+                "password": password
             }
     return db_credentials
 
@@ -97,7 +98,6 @@ def load_filters_from_parser(config_parser_obj):
 def save_app_config(app_instance, window_details=None):
     """Salvează configurația aplicației în CONFIG_FILE."""
     config = configparser.ConfigParser()
-    # Este o practică bună să citești întâi fișierul existent pentru a păstra secțiuni neatinse
     if os.path.exists(CONFIG_FILE):
         try:
             config.read(CONFIG_FILE, encoding='utf-8')
@@ -105,38 +105,45 @@ def save_app_config(app_instance, window_details=None):
             logging.warning(f"Atenție: Nu s-a putut citi config.ini existent la salvare: {e}")
 
     if not config.has_section('Database'): config.add_section('Database')
-    config.set('Database', 'db_host', app_instance.db_host or "")
-    config.set('Database', 'db_port', str(app_instance.db_port or 3306))
-    config.set('Database', 'db_name', app_instance.db_name or "")
-    config.set('Database', 'db_user', app_instance.db_user or "")
-    config.set('Database', 'db_password', app_instance.db_password or "") # Parola se salvează
+
+    # --- BLOC MODIFICAT PENTRU A PRELUA CREDENȚIALELE CORECT ---
+    db_creds_to_save = {}
+    if hasattr(app_instance, 'db_handler') and app_instance.db_handler and app_instance.db_handler.db_credentials:
+        db_creds_to_save = app_instance.db_handler.db_credentials
+
+    config.set('Database', 'db_host', db_creds_to_save.get('host', ''))
+    config.set('Database', 'db_port', str(db_creds_to_save.get('port', 3306)))
+    config.set('Database', 'db_name', db_creds_to_save.get('database', ''))
+    config.set('Database', 'db_user', db_creds_to_save.get('user', ''))
+    config.set('Database', 'db_password', db_creds_to_save.get('password', ''))
+    # --- SFÂRȘIT BLOC MODIFICAT ---
+
     if hasattr(app_instance, 'smtp_config') and app_instance.smtp_config:
         if not config.has_section('SMTP'):
             config.add_section('SMTP')
-        
+
         config.set('SMTP', 'server', app_instance.smtp_config.get('server', ''))
         config.set('SMTP', 'port', str(app_instance.smtp_config.get('port', '')))
         config.set('SMTP', 'security', app_instance.smtp_config.get('security', 'SSL/TLS'))
         config.set('SMTP', 'sender_email', app_instance.smtp_config.get('sender_email', ''))
         config.set('SMTP', 'user', app_instance.smtp_config.get('user', ''))
         config.set('SMTP', 'password', app_instance.smtp_config.get('password', ''))
-    
+
     if not config.has_section('General'):
         config.add_section('General')
-    
-    # Preluăm active_account_id direct din atributul instanței aplicației
-    active_id_to_save = "" # Valoare default dacă app_instance nu are atributul sau e None
+
+    active_id_to_save = ""
     if hasattr(app_instance, 'active_account_id') and app_instance.active_account_id is not None:
         active_id_to_save = str(app_instance.active_account_id)
     config.set('General', 'active_account_id', active_id_to_save)
 
     if not config.has_section('Filters'): config.add_section('Filters')
     config.set('Filters', 'date_range_mode', str(app_instance.date_range_mode_var.get()))
-    
+
     start_date_val = None
     if hasattr(app_instance, 'start_date') and app_instance.start_date.winfo_exists() and app_instance.start_date.get():
         start_date_val = app_instance.start_date.get_date()
-    
+
     end_date_val = None
     if hasattr(app_instance, 'end_date') and app_instance.end_date.winfo_exists() and app_instance.end_date.get():
         end_date_val = app_instance.end_date.get_date()
@@ -147,7 +154,7 @@ def save_app_config(app_instance, window_details=None):
         config.set('Filters', 'nav_year', "")
         config.set('Filters', 'nav_month_idx', "0")
         config.set('Filters', 'nav_day', "0")
-    else: # Mod Navigare
+    else:
         config.set('Filters', 'start_date', "")
         config.set('Filters', 'end_date', "")
         config.set('Filters', 'nav_year', str(app_instance.nav_selected_year or ""))
@@ -160,19 +167,17 @@ def save_app_config(app_instance, window_details=None):
 
     if hasattr(app_instance, 'tree') and app_instance.tree.winfo_exists():
         if not config.has_section('ColumnWidths'): config.add_section('ColumnWidths')
-        # Folosim treeview_display_columns din instanța aplicației, nu constanta,
-        # în caz că se va permite personalizarea coloanelor afișate în viitor.
         for col_id in app_instance.treeview_display_columns:
             try:
                 config.set('ColumnWidths', col_id, str(app_instance.tree.column(col_id, 'width')))
-            except Exception: # tk.TclError e specific, dar prindem mai larg
-                pass # Ignoră erorile la salvarea lățimii unei coloane (ex: widget distrus)
-    
+            except Exception:
+                pass
+
     if window_details:
         if not config.has_section('Window'): config.add_section('Window')
-        for k, v_val in window_details.items(): # Am redenumit v în v_val pentru a evita conflictul
+        for k, v_val in window_details.items():
             config.set('Window', k, v_val)
-    
+
     try:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as configfile:
             config.write(configfile)
