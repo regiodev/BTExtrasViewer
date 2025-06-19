@@ -139,7 +139,7 @@ class BTViewerApp:
 
     def manage_users(self):
         """Deschide dialogul de gestionare a utilizatorilor."""
-        UserManagerDialog(self.master, self.db_handler)
+        UserManagerDialog(self.master, self.db_handler, self.current_user)
 
     def configure_smtp(self):
         dialog = SMTPConfigDialog(self.master, initial_config=self.smtp_config)

@@ -692,9 +692,10 @@ class LoginDialog(simpledialog.Dialog):
 
 class UserEditDialog(simpledialog.Dialog):
     """Dialog modal pentru adăugarea sau modificarea unui utilizator."""
-    def __init__(self, parent, db_handler, user_id=None):
+    def __init__(self, parent, db_handler, user_id=None, current_user=None): # Acceptăm noul parametru
         self.db_handler = db_handler
         self.user_id = user_id
+        self.current_user = current_user # Îl stocăm
         self.user_data = None
         
         if self.user_id:
@@ -849,20 +850,16 @@ class UserEditDialog(simpledialog.Dialog):
 
         cursor = None
         try:
-            # --- BLOC NOU DE CORECȚIE ---
-            # Dacă o tranzacție este deja activă (de la pasul de validare),
-            # o comitem. Este o operațiune sigură, deoarece a fost doar o citire.
+            # Verificăm și închidem orice tranzacție de citire rămasă de la validare
             if self.db_handler.conn.in_transaction:
                 self.db_handler.conn.commit()
-            # --- SFÂRȘIT BLOC NOU DE CORECȚIE ---
             
-            # Acum putem porni în siguranță tranzacția pentru scriere
+            # Pornim o singură tranzacție nouă pentru toate operațiunile de scriere
             self.db_handler.conn.start_transaction()
             cursor = self.db_handler.conn.cursor()
             
-            # Pasul 3: Executarea operațiunilor SQL (Modificare sau Adăugare)
             if self.user_id: 
-                # Logică de MODIFICARE ...
+                # --- Logică de MODIFICARE ---
                 if password:
                     salt, pass_hash = auth_handler.hash_parola(password)
                     cursor.execute("UPDATE utilizatori SET nume_complet = %s, parola_hash = %s, salt = %s WHERE id = %s",
@@ -880,8 +877,12 @@ class UserEditDialog(simpledialog.Dialog):
                     account_values = [(self.user_id, acc_id) for acc_id in selected_account_ids]
                     cursor.executemany("INSERT INTO utilizatori_conturi_permise (id_utilizator, id_cont) VALUES (%s, %s)", account_values)
                 
+                # Jurnalizare acțiune de modificare
+                log_details = f"Utilizatorul '{username}' a fost modificat."
+                self.db_handler.log_action(self.current_user['id'], self.current_user['username'], "Modificare utilizator", log_details)
+                
             else: 
-                # Logică de ADĂUGARE ...
+                # --- Logică de ADĂUGARE ---
                 salt, pass_hash = auth_handler.hash_parola(password)
                 cursor.execute("INSERT INTO utilizatori (username, nume_complet, parola_hash, salt) VALUES (%s, %s, %s, %s)",
                                (username, fullname, pass_hash, salt))
@@ -895,22 +896,29 @@ class UserEditDialog(simpledialog.Dialog):
                     account_values = [(new_user_id, acc_id) for acc_id in selected_account_ids]
                     cursor.executemany("INSERT INTO utilizatori_conturi_permise (id_utilizator, id_cont) VALUES (%s, %s)", account_values)
 
-            # Pasul 4: Finalizarea tranzacției de scriere
+                # Jurnalizare acțiune de adăugare
+                log_details = f"Utilizatorul '{username}' a fost creat."
+                self.db_handler.log_action(self.current_user['id'], self.current_user['username'], "Adăugare utilizator", log_details)
+
+            # Finalizarea cu succes a tranzacției
             self.db_handler.conn.commit()
             self.result = True
 
         except mysql.connector.Error as e:
+            # Anularea tranzacției în caz de eroare
             self.db_handler.conn.rollback()
             messagebox.showerror("Eroare Bază de Date", f"Nu s-a putut salva utilizatorul:\n{e.msg}", parent=self)
             self.result = False
         finally:
+            # Închiderea cursorului la final
             if cursor:
                 cursor.close()
 
 class UserManagerDialog(simpledialog.Dialog):
     """Dialog pentru gestionarea utilizatorilor aplicației."""
-    def __init__(self, parent, db_handler):
+    def __init__(self, parent, db_handler, current_user): # 1. Acceptăm noul parametru
         self.db_handler = db_handler
+        self.current_user = current_user # 2. Îl stocăm
         self.selected_user_id = None
         self.selected_user_is_active = None
         super().__init__(parent, "Gestionare Utilizatori")
@@ -1022,14 +1030,16 @@ class UserManagerDialog(simpledialog.Dialog):
                 messagebox.showerror("Eroare", message, parent=self)
 
     def _on_add_user(self):
-        dialog = UserEditDialog(self, self.db_handler)
+        # 3. Trimitem current_user mai departe către UserEditDialog
+        dialog = UserEditDialog(self, self.db_handler, current_user=self.current_user)
         if dialog.result:
             messagebox.showinfo("Succes", "Utilizatorul a fost adăugat.", parent=self)
             self.load_users()
     
     def _on_edit_user(self):
         if not self.selected_user_id: return
-        dialog = UserEditDialog(self, self.db_handler, user_id=self.selected_user_id)
+        # 4. Trimitem current_user mai departe și aici
+        dialog = UserEditDialog(self, self.db_handler, user_id=self.selected_user_id, current_user=self.current_user)
         if dialog.result:
             messagebox.showinfo("Succes", "Utilizatorul a fost modificat.", parent=self)
             self.load_users()
@@ -1053,6 +1063,26 @@ class UserManagerDialog(simpledialog.Dialog):
         if messagebox.askyesno("Confirmare", f"Sunteți sigur că doriți să {action_text} utilizatorul '{username}'?", parent=self):
             success, message = self.db_handler.toggle_user_status(self.selected_user_id)
             if success:
+                # Jurnalizare acțiune
+                log_action_text = f"Dezactivare utilizator" if self.selected_user_is_active else "Activare utilizator"
+                log_details = f"Utilizatorul '{username}' a fost {action_text}."
+                self.db_handler.log_action(self.current_user['id'], self.current_user['username'], log_action_text, log_details)
+
                 self.load_users()
+            else:
+                messagebox.showerror("Eroare", message, parent=self)
+
+    def _on_delete_user(self):
+        # ... codul existent pentru verificări ...
+
+        if messagebox.askyesno("Confirmare Ștergere", f"Sunteți absolut sigur că doriți să ștergeți permanent utilizatorul '{username}'?\n\nAceastă acțiune nu poate fi anulată.", parent=self, icon='warning'):
+            success, message = self.db_handler.delete_user(self.selected_user_id)
+            if success:
+                # Jurnalizare acțiune
+                log_details = f"Utilizatorul '{username}' (ID: {self.selected_user_id}) a fost șters."
+                self.db_handler.log_action(self.current_user['id'], self.current_user['username'], "Ștergere utilizator", log_details)
+
+                messagebox.showinfo("Succes", message, parent=self)
+                self.load_users() # Reîmprospătăm lista
             else:
                 messagebox.showerror("Eroare", message, parent=self)
