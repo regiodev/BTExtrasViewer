@@ -83,6 +83,8 @@ class BTViewerApp:
         self.search_column_var = tk.StringVar(value="Toate coloanele")
         self.type_var = tk.StringVar(value="Toate")
         self.date_range_mode_var = tk.BooleanVar(value=False)
+
+        self.exact_search_var = tk.BooleanVar(value=False)
         
         self.nav_selected_year, self.nav_selected_month_index, self.nav_selected_day = None, 0, 0
         self._nav_select_job, self._current_processed_nav_iid = None, None
@@ -328,6 +330,7 @@ class BTViewerApp:
         style.configure("TLabel", font=(default_font_family, default_font_size))
         style.configure("TButton", font=(default_font_family, default_font_size))
         style.configure("TCombobox", font=(default_font_family, default_font_size))
+        style.configure("TCheckbutton", font=(default_font_family, default_font_size))
         self.master.option_add("*TCombobox*Listbox*Font", (default_font_family, default_font_size))
         style.configure("Treeview.Heading", font=(default_font_family, default_font_size, 'bold'))
         style.configure("Treeview", font=(default_font_family, default_font_size), rowheight=int(default_font_size * 2.2) + 4)
@@ -406,14 +409,25 @@ class BTViewerApp:
         self.type_combo = ttk.Combobox(row2_frame, textvariable=self.type_var, values=["Toate", "credit", "debit"], width=10, state="readonly", font=(default_font_family, default_font_size))
         self.type_combo.pack(side=tk.LEFT, padx=(2,10))
         self.type_combo.bind("<<ComboboxSelected>>", self.on_filter_change)
-        ttk.Label(row2_frame, text="Căutare:").pack(side=tk.LEFT, padx=(5,2))
+        
+        self.exact_search_checkbox = ttk.Checkbutton(
+            row2_frame, 
+            text="Căutare exactă:", 
+            variable=self.exact_search_var, 
+            command=self.on_filter_change,
+        )
+        self.exact_search_checkbox.pack(side=tk.LEFT, padx=(10, 5))
         self.search_entry = ttk.Entry(row2_frame, textvariable=self.search_var, width=20, font=(default_font_family, default_font_size))
         self.search_entry.pack(side=tk.LEFT)
         self.search_entry.bind("<KeyRelease>", self.schedule_search)
         ttk.Label(row2_frame, text="în:").pack(side=tk.LEFT, padx=(5,2))
-        self.search_column_combo = ttk.Combobox(row2_frame, textvariable=self.search_column_var, values=["Toate coloanele", "Beneficiar", "CIF", "Factura", "Descriere", "Observatii"], width=15, state="readonly", font=(default_font_family, default_font_size))
+        searchable_columns = [
+            "Toate coloanele", "Dată", "Descriere", "Observații", 
+            "Sumă", "Tip", "CIF", "Factură", "Beneficiar"
+        ]
+        self.search_column_combo = ttk.Combobox(row2_frame, textvariable=self.search_column_var, values=searchable_columns, width=15, state="readonly", font=(default_font_family, default_font_size))
         self.search_column_combo.pack(side=tk.LEFT, padx=(0,10))
-        self.search_column_combo.bind("<<ComboboxSelected>>", self.on_filter_change)
+        self.search_column_combo.bind("<<ComboboxSelected>>", self._on_search_column_changed)
         self.reset_button = ttk.Button(row2_frame, text="Resetează filtrele", command=self.reset_filters)
         self.reset_button.pack(side=tk.LEFT, padx=5)
         
@@ -507,6 +521,9 @@ class BTViewerApp:
         self.action_buttons = [self.report_button, self.balance_report_button, self.analysis_button, self.export_button, self.import_button, self.reset_button]
         
         self._toggle_action_buttons('disabled')
+
+        # Apelăm funcția o dată pentru a seta starea inițială corectă a checkbox-ului
+        self._on_search_column_changed()
 
     # Restul metodelor clasei BTViewerApp rămân neschimbate...
     # ... (de la _setup_nav_tree_columns până la final)
@@ -1184,6 +1201,19 @@ class BTViewerApp:
                 )
                 self.history_tree.insert("", "end", values=values)
 
+    def _on_search_column_changed(self, event=None):
+        """Gestionează schimbarea selecției în combobox-ul de căutare."""
+        if self.search_column_var.get() == "Toate coloanele":
+            # Dacă se selectează "Toate coloanele", dezactivăm și debifăm căutarea exactă
+            self.exact_search_checkbox.config(state=tk.DISABLED)
+            self.exact_search_var.set(False)
+        else:
+            # Pentru orice altă coloană, activăm opțiunea de căutare exactă
+            self.exact_search_checkbox.config(state=tk.NORMAL)
+        
+        # Apelăm funcția de filtrare pentru a reîmprospăta rezultatele imediat
+        self.on_filter_change()
+
     def refresh_table(self, start_date_override=None, end_date_override=None):
         if not (self.db_handler and self.db_handler.is_connected() and
                 hasattr(self, 'tree') and self.tree.winfo_exists() and 
@@ -1230,17 +1260,45 @@ class BTViewerApp:
         
         if self.type_var.get() != "Toate": query += " AND tip = %s"; params.append(self.type_var.get())
         if self.search_var.get():
-            search_term = f"%{self.search_var.get()}%"
             selected_search_area = self.search_column_var.get()
+            
+            # --- BLOC DE LOGICĂ NOU ȘI COMPLET ---
+            
+            # Verificăm dacă trebuie să facem o căutare exactă.
+            # Aceasta se aplică doar dacă o coloană specifică este selectată.
+            is_exact_search = self.exact_search_var.get() and selected_search_area != "Toate coloanele"
+
+            if is_exact_search:
+                # Pentru căutare exactă, termenul nu are wildcards (%) și operatorul este '='
+                search_term = self.search_var.get().strip()
+                operator = "="
+            else:
+                # Pentru căutare parțială, folosim wildcards și operatorul 'LIKE'
+                search_term = f"%{self.search_var.get().strip()}%"
+                operator = "LIKE"
+
+            col_map = {
+                "Beneficiar": "beneficiar", "CIF": "cif", "Factură": "factura", 
+                "Descriere": "descriere", "Observații": "observatii",
+                "Sumă": "suma", "Dată": "data", "Tip": "tip"
+            }
 
             if selected_search_area == "Toate coloanele":
-                query += " AND CONCAT_WS(' ', beneficiar, cif, factura, descriere, observatii) LIKE %s"
-                params.append(search_term)
+                # Căutarea pe "Toate coloanele" va folosi MEREU LIKE, ignorând starea checkbox-ului.
+                # Termenul de căutare este întotdeauna cu wildcards aici.
+                search_term_all_cols = f"%{self.search_var.get().strip()}%"
+                query += """ AND CONCAT_WS(' ', 
+                                beneficiar, cif, factura, descriere, observatii, 
+                                suma, data, tip, tid, rrn, pan
+                            ) LIKE %s """
+                params.append(search_term_all_cols)
             else:
-                col_map = {"Beneficiar": "beneficiar", "CIF": "cif", "Factura": "factura", "Descriere": "descriere", "Observatii": "observatii"}
-                search_col_db_name = col_map.get(selected_search_area, "descriere")
-                query += f" AND {search_col_db_name} LIKE %s"
-                params.append(search_term)
+                search_col_db_name = col_map.get(selected_search_area)
+                if search_col_db_name:
+                    # Construim interogarea folosind operatorul și termenul de căutare determinați mai sus
+                    query += f" AND {search_col_db_name} {operator} %s"
+                    params.append(search_term)
+            # --- SFÂRȘIT BLOC NOU ---
 
         sort_col_db = self.sort_column
         if sort_col_db not in select_cols_list and sort_col_db != 'id': sort_col_db = 'data' 
