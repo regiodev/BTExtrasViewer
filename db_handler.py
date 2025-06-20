@@ -61,7 +61,9 @@ CREATE TABLE IF NOT EXISTS istoric_importuri (
     tranzactii_procesate INT NOT NULL,
     tranzactii_ignorate INT NOT NULL,
     id_cont_fk INT NOT NULL,
-    FOREIGN KEY (id_cont_fk) REFERENCES conturi_bancare(id_cont) ON DELETE CASCADE
+    id_utilizator_fk INT,
+    FOREIGN KEY (id_cont_fk) REFERENCES conturi_bancare(id_cont) ON DELETE CASCADE,
+    FOREIGN KEY (id_utilizator_fk) REFERENCES utilizatori(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
 """
 

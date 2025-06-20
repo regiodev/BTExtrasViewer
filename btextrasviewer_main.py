@@ -315,6 +315,8 @@ class BTViewerApp:
         if self.master.winfo_exists():
             self.master.after(300, lambda: self._schedule_ui_population_steps(self.config, "(initial setup)"))
 
+            self._populate_history_tab()
+
             # Populăm și jurnalul de acțiuni la pornire
             self._populate_audit_log_tab()
 
@@ -440,14 +442,16 @@ class BTViewerApp:
         self.tree.bind("<Double-1>", self.show_transaction_details)
         history_tab = ttk.Frame(main_content_notebook)
         main_content_notebook.add(history_tab, text=" Istoric Importuri ")
-        history_cols = ("fisier", "data", "noi", "ignorate", "cont")
+        history_cols = ("fisier", "data", "utilizator", "noi", "ignorate", "cont")
         self.history_tree = ttk.Treeview(history_tab, columns=history_cols, show="headings")
         self.history_tree.heading("fisier", text="Nume Fișier")
         self.history_tree.heading("data", text="Data Import")
+        self.history_tree.heading("utilizator", text="Utilizator")
         self.history_tree.heading("noi", text="Tranzacții Noi")
         self.history_tree.heading("ignorate", text="Tranzacții Ignorate")
         self.history_tree.heading("cont", text="Importat în Contul")
         self.history_tree.column("fisier", width=250); self.history_tree.column("data", width=150)
+        self.history_tree.column("utilizator", width=120, anchor='w')
         self.history_tree.column("noi", width=120, anchor='center'); self.history_tree.column("ignorate", width=130, anchor='center')
         self.history_tree.column("cont", width=200)
         history_scrollbar = ttk.Scrollbar(history_tab, orient="vertical", command=self.history_tree.yview)
@@ -1011,6 +1015,7 @@ class BTViewerApp:
         target_id, files_for_this_batch = current_batch['target_id'], current_batch['files']
         
         self.current_batch_info_for_message = {'target_id': target_id, 'num_files': len(files_for_this_batch)}
+        self.current_batch_files_for_history = files_for_this_batch
 
         acc_obj_batch = next((acc for acc in self.accounts_list if acc['id_cont'] == target_id), None)
         target_name_batch = acc_obj_batch['nume_cont'] if acc_obj_batch else f"ID Cont {target_id}"
@@ -1062,6 +1067,23 @@ class BTViewerApp:
                 processed_target_id = batch_info.get('target_id')
                 processed_target_name = next((acc['nume_cont'] for acc in self.accounts_list if acc['id_cont'] == processed_target_id), f"ID {processed_target_id}")
                 
+                # --- BLOC FINAL PENTRU SALVARE ISTORIC ---
+                if self.db_handler and inserted > 0: # Salvăm doar dacă s-a importat ceva nou
+                    try:
+                        # Concatenăm numele fișierelor din lot
+                        filenames_str = ", ".join([os.path.basename(f) for f in self.current_batch_files_for_history])
+                        
+                        sql_insert_history = """
+                            INSERT INTO istoric_importuri 
+                            (nume_fisier, tranzactii_procesate, tranzactii_ignorate, id_cont_fk, id_utilizator_fk) 
+                            VALUES (%s, %s, %s, %s, %s)
+                        """
+                        params_history = (filenames_str, inserted, ignored, processed_target_id, self.current_user['id'])
+                        self.db_handler.execute_commit(sql_insert_history, params_history)
+                    except Exception as e_hist:
+                        logging.error(f"Nu s-a putut salva istoricul de import: {e_hist}")
+                # --- SFÂRȘIT BLOC FINAL ---
+
                 if self.db_handler:
                     log_details = (f"Import în contul '{processed_target_name}'. Fișiere procesate: {num_files_in_batch}. "
                                    f"Tranzacții noi: {inserted}, Ignorate (duplicate): {ignored}.")
@@ -1074,7 +1096,6 @@ class BTViewerApp:
                 
                 self._finalize_background_task(final_batch_message, success=True, operation_type=operation_type)
 
-                # --- BLOCUL PROBLEMATIC A FOST ÎNLUCUIT CU ACEST BLOC SIMPLIFICAT ---
                 if processed_target_id is not None:
                     # Dacă lotul procesat a fost pentru un alt cont decât cel activ,
                     # comutăm pe contul nou importat pentru a vedea direct rezultatele.
@@ -1090,7 +1111,7 @@ class BTViewerApp:
                     # Reîmprospătăm TOATĂ interfața pentru a reflecta noile date
                     self.refresh_ui_for_account_change()
 
-                # --- SFÂRȘIT BLOC CORECTAT ---
+                    self._populate_history_tab() # Reîmprospătăm istoricul
                 
                 if self.master.winfo_exists():
                     self.master.after(100, self._process_next_import_batch)
@@ -1120,6 +1141,49 @@ class BTViewerApp:
         except Exception as e:
             logging.error(f"Eroare CRITICĂ în _check_batch_import_progress: {type(e).__name__}: {e}", exc_info=True)
     
+    def _populate_history_tab(self):
+        """Populează tab-ul 'Istoric Importuri' cu date din baza de date."""
+        if not hasattr(self, 'history_tree') or not self.history_tree.winfo_exists():
+            return
+
+        for item in self.history_tree.get_children():
+            self.history_tree.delete(item)
+
+        if not (self.db_handler and self.db_handler.is_connected()):
+            return
+
+        # --- Interogare SQL actualizată cu JOIN la tabela de utilizatori ---
+        query = """
+            SELECT 
+                h.nume_fisier, 
+                h.data_import, 
+                h.tranzactii_procesate, 
+                h.tranzactii_ignorate, 
+                c.nume_cont,
+                u.username 
+            FROM istoric_importuri h
+            JOIN conturi_bancare c ON h.id_cont_fk = c.id_cont
+            LEFT JOIN utilizatori u ON h.id_utilizator_fk = u.id
+            ORDER BY h.data_import DESC
+            LIMIT 200;
+        """
+        history_entries = self.db_handler.fetch_all_dict(query)
+
+        if history_entries:
+            for entry in history_entries:
+                timestamp_str = entry['data_import'].strftime('%d-%m-%Y %H:%M:%S') if entry.get('data_import') else ''
+                
+                # --- Tuplul de valori a fost actualizat pentru a include utilizatorul ---
+                values = (
+                    entry.get('nume_fisier', 'N/A'),
+                    timestamp_str,
+                    entry.get('username', 'Utilizator Șters'), # Afișăm un text generic dacă utilizatorul a fost șters
+                    entry.get('tranzactii_procesate', 0),
+                    entry.get('tranzactii_ignorate', 0),
+                    entry.get('nume_cont', 'N/A')
+                )
+                self.history_tree.insert("", "end", values=values)
+
     def refresh_table(self, start_date_override=None, end_date_override=None):
         if not (self.db_handler and self.db_handler.is_connected() and
                 hasattr(self, 'tree') and self.tree.winfo_exists() and 
