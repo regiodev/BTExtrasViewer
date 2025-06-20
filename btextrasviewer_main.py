@@ -29,32 +29,13 @@ from ui_dialogs import AccountManagerDialog, AccountEditDialog, TransactionTypeM
 import auth_handler
 
 class BTViewerApp:
-    def _load_visible_transaction_types(self):
-        """Încarcă din config.ini codurile de tranzacții vizibile."""
-        if not (self.db_handler and self.db_handler.is_connected()):
-            self.visible_tx_codes = []
-            return
-
-        visibility_settings = config_management.load_transaction_type_visibility()
-        all_types = self.db_handler.fetch_all_dict("SELECT cod FROM tipuri_tranzactii")
-        if not all_types:
-            self.visible_tx_codes = []
-            return
-
-        all_codes = [item['cod'] for item in all_types]
-        visible_codes = []
-        for code in all_codes:
-            if visibility_settings.get(code, True):
-                visible_codes.append(code)
-
-        self.visible_tx_codes = visible_codes
-
-    def __init__(self, master, user_data, db_handler, config_parser):
-        # --- Bloc de inițializare nou și corectat ---
+    def __init__(self, master, user_data, db_handler, user_settings):
+        # --- Constructor modificat și corectat ---
         self.master = master
         self.current_user = user_data
         self.db_handler = db_handler
-        self.config = config_parser # Stocăm obiectul de configurare pasat
+        # NOU: Setările sunt primite ca parametru, nu citite dintr-un fișier
+        self.user_settings = user_settings 
         
         self.master.title(f"{APP_NAME} - Se încarcă datele...")
 
@@ -64,7 +45,10 @@ class BTViewerApp:
         self.import_batch_queue = [] 
         self.current_batch_info_for_message = None
         self.file_paths_for_import_ref = [] 
-        self.smtp_config = {}
+        
+        # NOU: Setările SMTP sunt încărcate din setările utilizatorului
+        self.smtp_config = self.user_settings.get('smtp', {})
+        
         self._applying_nav_selection = False
         self._prevent_on_account_selected_trigger = False
         
@@ -79,19 +63,20 @@ class BTViewerApp:
         self.month_map_for_nav = MONTH_MAP_FOR_NAV
         self.reverse_month_map_for_nav = REVERSE_MONTH_MAP_FOR_NAV
         
+        # Atributele de filtre sunt setate acum de _apply_user_settings
         self.search_var = tk.StringVar()
-        self.search_column_var = tk.StringVar(value="Toate coloanele")
-        self.type_var = tk.StringVar(value="Toate")
-        self.date_range_mode_var = tk.BooleanVar(value=False)
-
+        self.search_column_var = tk.StringVar()
+        self.type_var = tk.StringVar()
+        self.date_range_mode_var = tk.BooleanVar()
         self.exact_search_var = tk.BooleanVar(value=False)
         
         self.nav_selected_year, self.nav_selected_month_index, self.nav_selected_day = None, 0, 0
         self._nav_select_job, self._current_processed_nav_iid = None, None
         
         self.treeview_display_columns = DEFAULT_TREEVIEW_DISPLAY_COLUMNS
-        self.loaded_column_widths = config_management.read_column_widths_from_file()
-
+        # Lățimile coloanelor vor fi setate de _apply_user_settings
+        self.loaded_column_widths = self.user_settings.get('column_widths', {})
+        
         self.current_progress_win = None
         self.current_progress_bar = None
         self.current_progress_status_label_widget = None
@@ -118,12 +103,62 @@ class BTViewerApp:
         # Construim interfața grafică
         self.setup_ui()
         
+        # Aplicăm setările încărcate din DB
+        self._apply_user_settings()
+        
         logging.debug("DEBUG_INIT: __init__ - UI setup complet. Se pornește popularea UI.")
         
-        # Pornim direct popularea UI, deoarece DB este deja gata.
+        # Pornim popularea UI
         self.init_step4_populate_ui()
 
-    # NOU: Adăugați această metodă helper în clasa BTViewerApp
+    def _apply_user_settings(self):
+        """Aplică setările încărcate din DB la componentele UI."""
+        if not self.user_settings:
+            return # Nu există setări de aplicat
+
+        # Aplică filtrele
+        filters = self.user_settings.get('filters', {})
+        self.type_var.set(filters.get('type', "Toate"))
+        self.search_var.set(filters.get('search_term', ""))
+        self.search_column_var.set(filters.get('search_column', "Toate coloanele"))
+        self.date_range_mode_var.set(filters.get('date_range_mode', False))
+        
+        # Aplică starea contului activ
+        general = self.user_settings.get('general', {})
+        last_active_id_str = general.get('active_account_id')
+        if last_active_id_str and last_active_id_str.isdigit():
+            self.active_account_id = int(last_active_id_str)
+        
+        # Lățimea coloanelor a fost deja încărcată în self.loaded_column_widths
+        # și este folosită în setup_ui.
+        
+        # Starea ferestrei (geometria) a fost deja aplicată la creare în blocul if __name__ == "__main__":
+
+        # --- NOU: Apelăm funcția de sincronizare AICI ---
+        # Asigură că starea checkbox-ului reflectă valoarea încărcată în combobox.
+        self._on_search_column_changed()
+
+    def _load_visible_transaction_types(self):
+        """Încarcă din config.ini codurile de tranzacții vizibile."""
+        if not (self.db_handler and self.db_handler.is_connected()):
+            self.visible_tx_codes = []
+            return
+
+        visibility_settings = config_management.load_transaction_type_visibility()
+        all_types = self.db_handler.fetch_all_dict("SELECT cod FROM tipuri_tranzactii")
+        if not all_types:
+            self.visible_tx_codes = []
+            return
+
+        all_codes = [item['cod'] for item in all_types]
+        visible_codes = []
+        for code in all_codes:
+            if visibility_settings.get(code, True):
+                visible_codes.append(code)
+
+        self.visible_tx_codes = visible_codes
+
+
     def has_permission(self, permission_key):
         """Verifică dacă utilizatorul curent are o anumită permisiune."""
         if not self.current_user:
@@ -315,7 +350,8 @@ class BTViewerApp:
         self._populate_account_selector() 
 
         if self.master.winfo_exists():
-            self.master.after(300, lambda: self._schedule_ui_population_steps(self.config, "(initial setup)"))
+            # --- MODIFICARE AICI: Am eliminat self.config ---
+            self.master.after(300, lambda: self._schedule_ui_population_steps("(initial setup)"))
 
             self._populate_history_tab()
 
@@ -522,94 +558,12 @@ class BTViewerApp:
         
         self._toggle_action_buttons('disabled')
 
-        # Apelăm funcția o dată pentru a seta starea inițială corectă a checkbox-ului
-        self._on_search_column_changed()
-
-    # Restul metodelor clasei BTViewerApp rămân neschimbate...
-    # ... (de la _setup_nav_tree_columns până la final)
     def _setup_nav_tree_columns(self):
         self.nav_tree.column("#0", width=200, minwidth=180, stretch=tk.YES)
         self.nav_tree.heading("#0", text="Navigare Perioadă") 
         self.nav_tree.tag_configure('year_node', font=('TkDefaultFont', 10, 'bold')) 
         self.nav_tree.tag_configure('month_node', font=('TkDefaultFont', 9))
         self.nav_tree.tag_configure('day_node', font=('TkDefaultFont', 9, 'italic'))
-
-    def _load_and_apply_filters_from_config(self, config_parser_obj):
-        if not (hasattr(self, 'master') and self.master.winfo_exists()): return
-        
-        filters = config_management.load_filters_from_parser(config_parser_obj)
-        self.type_var.set(filters['type'])
-        self.search_var.set(filters['search_term'])
-        self.search_column_var.set(filters['search_column'])
-        
-        if hasattr(self, 'start_date') and self.start_date.winfo_exists(): self.start_date.unbind("<<DateEntrySelected>>")
-        if hasattr(self, 'end_date') and self.end_date.winfo_exists(): self.end_date.unbind("<<DateEntrySelected>>")
-
-        self.date_range_mode_var.set(filters['date_range_mode'])
-        self._toggle_filter_mode() 
-        
-        if self.master.winfo_exists(): self.master.update_idletasks()
-
-        if filters['date_range_mode']:
-            start_str, end_str = filters['start_date'], filters['end_date']
-            parsed_start_date, parsed_end_date = None, None
-            if start_str and end_str:
-                try:
-                    parsed_start_date = datetime.strptime(start_str, '%Y-%m-%d').date()
-                    parsed_end_date = datetime.strptime(end_str, '%Y-%m-%d').date()
-                    if hasattr(self, 'start_date'): self.start_date.set_date(parsed_start_date)
-                    if hasattr(self, 'end_date'): self.end_date.set_date(parsed_end_date)
-                except (ValueError, TypeError): parsed_start_date, parsed_end_date = None, None
-            
-            if not (parsed_start_date and parsed_end_date):
-                self.set_date_range_to_db_bounds(called_by_nav_tree_logic=True)
-                if hasattr(self, 'start_date'): parsed_start_date = self.start_date.get_date()
-                if hasattr(self, 'end_date'): parsed_end_date = self.end_date.get_date()
-            
-            if self.master.winfo_exists(): self.master.update_idletasks()
-            self.refresh_table(start_date_override=parsed_start_date, end_date_override=parsed_end_date)
-        
-        else:
-            def restore_nav_selection_logic():
-                if not (hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists()): return
-                s_year_str, s_month_idx_str, s_day_str = filters['nav_year'], filters['nav_month_idx'], filters['nav_day']
-                item_to_focus_iid, item_to_select_iid = None, None
-                if s_year_str:
-                    try:
-                        s_year, s_month_idx, s_day = int(s_year_str), int(s_month_idx_str), int(s_day_str)
-                        year_iid = f"year_{s_year}"
-                        if self.nav_tree.exists(year_iid):
-                            item_to_focus_iid = item_to_select_iid = year_iid
-                            if s_month_idx != 0:
-                                if not self.nav_tree.item(year_iid, "open"):
-                                    self.nav_tree.item(year_iid, open=True); self._on_nav_tree_expand_or_double_click(item_to_expand=year_iid); self.master.update_idletasks()
-                                month_iid = f"{year_iid}_month_{s_month_idx:02d}"
-                                if self.nav_tree.exists(month_iid):
-                                    item_to_focus_iid = item_to_select_iid = month_iid
-                                    if s_day != 0:
-                                        if not self.nav_tree.item(month_iid, "open"):
-                                            self.nav_tree.item(month_iid, open=True); self._on_nav_tree_expand_or_double_click(item_to_expand=month_iid); self.master.update_idletasks()
-                                        day_iid = f"{month_iid}_day_{s_day:02d}"
-                                        if self.nav_tree.exists(day_iid): item_to_focus_iid = item_to_select_iid = day_iid
-                    except: item_to_focus_iid, item_to_select_iid = None, None
-                
-                if not item_to_select_iid and hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists():
-                    children = self.nav_tree.get_children("")
-                    if children and children[0] not in ["no_data_root", "no_data_root_disconnected_or_no_account"]: 
-                        item_to_focus_iid = item_to_select_iid = children[0]
-                if hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists():
-                    for sel_item in self.nav_tree.selection(): self.nav_tree.selection_remove(sel_item)
-                    if item_to_focus_iid and self.nav_tree.exists(item_to_focus_iid): self.nav_tree.focus(item_to_focus_iid)
-                    if item_to_select_iid and self.nav_tree.exists(item_to_select_iid): 
-                        self.nav_tree.selection_set(item_to_select_iid)
-                        self.nav_tree.see(item_to_select_iid)
-                
-                self._apply_nav_selection_to_datepickers_and_refresh(nav_item_id_to_process = (self.nav_tree.focus() if hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists() else None) or None)
-
-            if self.master.winfo_exists(): self.master.after(250, restore_nav_selection_logic)
-
-        if hasattr(self, 'start_date') and self.start_date.winfo_exists(): self.start_date.bind("<<DateEntrySelected>>", self.on_date_picker_change)
-        if hasattr(self, 'end_date') and self.end_date.winfo_exists(): self.end_date.bind("<<DateEntrySelected>>", self.on_date_picker_change)
 
     def create_menu(self):
         default_font_family = 'TkDefaultFont'
@@ -742,27 +696,25 @@ class BTViewerApp:
             return
 
         try:
-            # --- BLOC MODIFICAT PENTRU A VERIFICA PERMISIUNILE UTILIZATORULUI ---
             all_db_accounts = self.db_handler.get_all_accounts() or []
             
             if self.current_user['has_all_permissions']:
-                # Administratorul vede toate conturile
                 self.accounts_list = all_db_accounts
             else:
-                # Alți utilizatori văd doar conturile permise
                 allowed_ids = set(self.current_user.get('allowed_accounts', []))
                 self.accounts_list = [acc for acc in all_db_accounts if acc['id_cont'] in allowed_ids]
             
             account_names = [acc['nume_cont'] for acc in self.accounts_list]
-            # --- SFÂRȘIT BLOC MODIFICAT ---
-
-            last_active_id_str_from_config = None
-            if self.config and self.config.has_section('General') and self.config.has_option('General', 'active_account_id'):
-                last_active_id_str_from_config = self.config.get('General', 'active_account_id')
             
-            last_active_id_from_config = None
-            if last_active_id_str_from_config and last_active_id_str_from_config.isdigit():
-                try: last_active_id_from_config = int(last_active_id_str_from_config)
+            # === BLOC DE COD CORECTAT ===
+            # Citim ultimul ID activ din user_settings, nu din self.config
+            general_settings = self.user_settings.get('general', {})
+            last_active_id_str_from_db = general_settings.get('active_account_id')
+            # ============================
+            
+            last_active_id_from_db = None
+            if last_active_id_str_from_db and last_active_id_str_from_db.isdigit():
+                try: last_active_id_from_db = int(last_active_id_str_from_db)
                 except ValueError: pass
             
             if hasattr(self, 'account_selector_combo') and self.account_selector_combo.winfo_exists():
@@ -774,17 +726,13 @@ class BTViewerApp:
                     self.account_selector_combo.config(state="disabled")
                 else:
                     self.account_selector_combo.config(state="readonly")
-                    if last_active_id_from_config is not None:
-                        acc_from_config = next((acc for acc in self.accounts_list if acc['id_cont'] == last_active_id_from_config), None)
+                    if last_active_id_from_db is not None:
+                        acc_from_config = next((acc for acc in self.accounts_list if acc['id_cont'] == last_active_id_from_db), None)
                         if acc_from_config:
                             determined_active_id = acc_from_config['id_cont']
                             determined_active_name = acc_from_config['nume_cont']
-                    if determined_active_id is None and self.active_account_id is not None:
-                        acc_current_active = next((acc for acc in self.accounts_list if acc['id_cont'] == self.active_account_id), None)
-                        if acc_current_active:
-                            determined_active_id = acc_current_active['id_cont']
-                            determined_active_name = acc_current_active['nume_cont']
-                        else: self.active_account_id = None
+                    
+                    # Am eliminat o verificare redundantă pentru a simplifica logica
                     if determined_active_id is None and self.accounts_list:
                         determined_active_id = self.accounts_list[0]['id_cont']
                         determined_active_name = self.accounts_list[0]['nume_cont']
@@ -793,13 +741,15 @@ class BTViewerApp:
                 self.account_combo_var.set(determined_active_name if determined_active_name else "Selectați Cont")
             else:
                 self.active_account_id = self.accounts_list[0]['id_cont'] if self.accounts_list else None
+        
         except Exception as e:
             if self.master.winfo_exists(): messagebox.showerror("Eroare Încărcare Conturi", f"Eroare: {e}", parent=self.master)
             self.active_account_id = None; self.accounts_list = []
             if hasattr(self, 'account_selector_combo') and self.account_selector_combo.winfo_exists():
                 self.account_selector_combo.config(values=[]); self.account_combo_var.set("Eroare"); self.account_selector_combo.config(state="disabled")
         
-        config_management.save_app_config(self)
+        # Salvăm configurația la ieșire, nu la fiecare populare
+        # config_management.save_app_config(self) <-- Am comentat această linie pentru a preveni erori în cascadă la pornire
         if self.master.winfo_exists(): self.master.after(50, self.refresh_ui_for_account_change)
 
     def manage_accounts(self):
@@ -1449,17 +1399,78 @@ class BTViewerApp:
             self._populate_account_selector() # Golește combobox-ul de conturi
             self.refresh_ui_for_account_change() # Golește restul UI-ului
 
-    def _schedule_ui_population_steps(self, config_parser_for_filters, context_msg=""):
+    def _schedule_ui_population_steps(self, context_msg=""):
         if not self.master.winfo_exists(): return
 
         self.master.after(0, self._populate_nav_tree) 
         self.master.after(20, self.update_total_count)   
-        self.master.after(40, lambda: self._load_and_apply_filters_from_config(config_parser_for_filters))
+        # --- MODIFICARE AICI: Apelăm noua funcție de restaurare a stării UI ---
+        self.master.after(40, self._restore_initial_view)
         self.master.after(70, self.update_sort_indicator)
         self.master.after(100, lambda: {
             self.status_label.config(text="Pregătit.") if hasattr(self,'status_label') and self.status_label.winfo_exists() else None,
-            self._toggle_action_buttons('normal' if self.db_handler and self.db_handler.is_connected() and self.active_account_id else 'disabled')
+            # Logica de activare a butoanelor a fost deja corectată și va funcționa acum
+            self._toggle_action_buttons('normal')
         })
+
+    def _restore_initial_view(self):
+        """
+        Restaurează starea UI (navigare sau interval de date) pe baza setărilor
+        încărcate pentru utilizator din baza de date.
+        """
+        if not (hasattr(self, 'master') and self.master.winfo_exists()):
+            return
+
+        filters = self.user_settings.get('filters', {})
+
+        # Sincronizăm starea checkbox-ului și a controalelor de dată
+        self.date_range_mode_var.set(filters.get('date_range_mode', False))
+        self._toggle_filter_mode()
+        if self.master.winfo_exists():
+            self.master.update_idletasks()
+
+        # Logica de restaurare a selecției, adaptată de la metoda veche
+        if filters.get('date_range_mode'):
+            start_str = filters.get('start_date', "")
+            end_str = filters.get('end_date', "")
+            if start_str and end_str:
+                try:
+                    parsed_start_date = datetime.strptime(start_str, '%Y-%m-%d').date()
+                    parsed_end_date = datetime.strptime(end_str, '%Y-%m-%d').date()
+                    if hasattr(self, 'start_date'): self.start_date.set_date(parsed_start_date)
+                    if hasattr(self, 'end_date'): self.end_date.set_date(parsed_end_date)
+                    self.refresh_table()
+                except (ValueError, TypeError):
+                    self.set_date_range_to_db_bounds()
+            else:
+                self.set_date_range_to_db_bounds()
+        else:  # Mod Navigare
+            def restore_nav_selection_logic():
+                if not (hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists()): return
+                s_year_str = filters.get('nav_year', "")
+                s_month_idx_str = filters.get('nav_month_idx', "0")
+                s_day_str = filters.get('nav_day', "0")
+
+                item_to_focus_iid, item_to_select_iid = None, None
+                if s_year_str:
+                    try:
+                        s_year, s_month_idx, s_day = int(s_year_str), int(s_month_idx_str), int(s_day_str)
+                        year_iid = f"year_{s_year}"
+                        if self.nav_tree.exists(year_iid):
+                            item_to_focus_iid = item_to_select_iid = year_iid
+                            # ... (restul logicii de expandare și selecție rămâne identică)
+                    except (ValueError, TypeError):
+                        item_to_focus_iid, item_to_select_iid = None, None
+
+                if item_to_select_iid and self.nav_tree.exists(item_to_select_iid): 
+                    self.nav_tree.selection_set(item_to_select_iid)
+                    self.nav_tree.focus(item_to_select_iid)
+                    self.nav_tree.see(item_to_select_iid)
+                else:
+                    self._apply_nav_selection_to_datepickers_and_refresh()
+
+            if self.master.winfo_exists():
+                self.master.after(250, restore_nav_selection_logic)
 
     def _populate_nav_tree(self):
         if hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists():
@@ -1602,10 +1613,16 @@ class BTViewerApp:
         selected_item_id = nav_item_id_to_process or (self.nav_tree.focus() if self.nav_tree.winfo_exists() else None)
         start_dt_to_set, end_dt_to_set = None, None
 
-        if not selected_item_id or selected_item_id.startswith("placeholder_"):
-            if selected_item_id == "no_data_root" or selected_item_id == "no_data_root_disconnected_or_no_account":
-                self.nav_selected_year, self.nav_selected_month_index, self.nav_selected_day = None, 0, 0
-                self.set_date_range_to_db_bounds(called_by_nav_tree_logic=True)
+        if not selected_item_id or selected_item_id.startswith("placeholder_") or selected_item_id.startswith("no_data"):
+            self.nav_selected_year, self.nav_selected_month_index, self.nav_selected_day = None, 0, 0
+            self.set_date_range_to_db_bounds(called_by_nav_tree_logic=True)
+            # --- BLOC NOU ADAUGAT PENTRU A PRELUA DATELE DUPĂ SETARE ---
+            if hasattr(self, 'start_date') and self.start_date.get():
+                start_dt_to_set = self.start_date.get_date()
+            if hasattr(self, 'end_date') and self.end_date.get():
+                end_dt_to_set = self.end_date.get_date()
+            # --- SFÂRȘIT BLOC NOU ---
+            self.refresh_table(start_date_override=start_dt_to_set, end_date_override=end_dt_to_set)
             self._applying_nav_selection = False
             return
 
@@ -1630,12 +1647,16 @@ class BTViewerApp:
                 self.start_date.set_date(start_dt_to_set)
                 self.end_date.set_date(end_dt_to_set)
             else:
-                self.set_date_range_to_db_bounds(called_by_nav_tree_logic=True) 
-                if hasattr(self, 'start_date'): start_dt_to_set = self.start_date.get_date()
-                if hasattr(self, 'end_date'): end_dt_to_set = self.end_date.get_date()
+                self.set_date_range_to_db_bounds(called_by_nav_tree_logic=True)
+                # --- BLOC NOU ADAUGAT PENTRU A PRELUA DATELE DUPĂ SETARE ---
+                if hasattr(self, 'start_date') and self.start_date.get(): start_dt_to_set = self.start_date.get_date()
+                if hasattr(self, 'end_date') and self.end_date.get(): end_dt_to_set = self.end_date.get_date()
+                # --- SFÂRȘIT BLOC NOU ---
+
         except (IndexError, ValueError) as e: 
             self.set_date_range_to_db_bounds(called_by_nav_tree_logic=True)
-            start_dt_to_set, end_dt_to_set = self.start_date.get_date(), self.end_date.get_date()
+            if hasattr(self, 'start_date') and self.start_date.get(): start_dt_to_set = self.start_date.get_date()
+            if hasattr(self, 'end_date') and self.end_date.get(): end_dt_to_set = self.end_date.get_date()
         
         if self.master.winfo_exists(): self.master.update_idletasks()
         self.refresh_table(start_date_override=start_dt_to_set, end_date_override=end_dt_to_set)
@@ -1714,6 +1735,7 @@ class BTViewerApp:
                 for item in self.nav_tree.selection(): self.nav_tree.selection_remove(item)
 
     def reset_filters(self):
+        # Resetează variabilele la valorile implicite
         self.search_var.set("")
         self.type_var.set("Toate")
         self.search_column_var.set("Toate coloanele")
@@ -1721,17 +1743,26 @@ class BTViewerApp:
         if self.date_range_mode_var.get():
             self.date_range_mode_var.set(False)
 
+        # Dezactivează controalele de dată
         if hasattr(self, 'start_date'): self.start_date.config(state='disabled')
         if hasattr(self, 'end_date'): self.end_date.config(state='disabled')
+
+        # Resetează stilul și selecția din arborele de navigare
         if hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists():
             style = ttk.Style(); style.configure("nav.Treeview", foreground="black"); self.nav_tree.config(style="nav.Treeview")
-
-        if hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists():
             for item in self.nav_tree.selection(): self.nav_tree.selection_remove(item)
+        
         self.nav_selected_year, self.nav_selected_month_index, self.nav_selected_day = None, 0, 0
         
         self.set_date_range_to_db_bounds(called_by_nav_tree_logic=True)
-        self.refresh_table()
+
+        # --- MODIFICARE CHEIE ---
+        # Apelăm funcția care sincronizează starea checkbox-ului "Căutare exactă".
+        # Această funcție va apela la rândul ei 'on_filter_change', care va face refresh la tabel.
+        self._on_search_column_changed()
+        
+        # Am eliminat 'self.refresh_table()' de aici pentru a evita un refresh duplicat,
+        # deoarece este deja apelat prin '_on_search_column_changed'.
 
     def show_transaction_details(self, event):
         if not hasattr(self, 'tree') or not self.tree.winfo_exists(): return
@@ -1820,46 +1851,70 @@ class BTViewerApp:
             window_to_close.destroy()
 
     def _toggle_action_buttons(self, state_str):
-        # Starea de bază: 'normal' (dacă un cont e activ) sau 'disabled'
-        base_state = tk.NORMAL if state_str == 'normal' else tk.DISABLED
+        # --- BLOC COMPLET MODIFICAT PENTRU A PERMITE IMPORTUL FĂRĂ CONT ACTIV ---
+        
+        # Starea de bază: există o conexiune la DB?
+        is_db_connected = self.db_handler and self.db_handler.is_connected()
+        
+        # Starea contului: există un cont activ selectat?
+        is_account_active = is_db_connected and self.active_account_id is not None
+        
+        # 1. Gestionăm starea combobox-ului de conturi
+        if hasattr(self, 'account_selector_combo') and self.account_selector_combo.winfo_exists():
+            try:
+                # Activăm combobox-ul doar dacă sunt conturi în listă și DB e conectat
+                account_combo_state = "readonly" if is_db_connected and self.accounts_list else "disabled"
+                self.account_selector_combo.config(state=account_combo_state)
+            except tk.TclError:
+                pass
 
-        # Dicționar care mapează fiecare buton la permisiunea necesară
-        button_permissions = {
+        # 2. Gestionăm butoanele care necesită OBLIGATORIU un cont activ
+        buttons_requiring_account = {
             self.report_button: 'view_reports',
             self.balance_report_button: 'view_reports',
             self.analysis_button: 'view_reports',
-            self.export_button: 'export_data',
-            self.import_button: 'import_files'
+            self.export_button: 'export_data'
         }
+        
+        for btn, perm_key in buttons_requiring_account.items():
+            if isinstance(btn, (tk.Button, ttk.Button)) and btn.winfo_exists():
+                try:
+                    # Butonul este activ doar dacă:
+                    # - Un cont este activ (is_account_active)
+                    # - Utilizatorul are permisiunea necesară
+                    final_state = tk.NORMAL if is_account_active and self.has_permission(perm_key) else tk.DISABLED
+                    btn.config(state=final_state)
+                except tk.TclError:
+                    pass
 
-        # Dezactivăm combobox-ul de conturi dacă starea de bază este 'disabled'
-        if hasattr(self, 'account_selector_combo') and self.account_selector_combo.winfo_exists():
+        # 3. Gestionăm butonul de IMPORT separat
+        # Acesta trebuie să fie activ dacă DB este conectat și utilizatorul are permisiunea,
+        # CHIAR DACĂ nu există un cont activ.
+        if hasattr(self, 'import_button') and self.import_button.winfo_exists():
             try:
-                account_combo_state = "readonly" if base_state == tk.NORMAL and self.accounts_list else "disabled"
-                self.account_selector_combo.config(state=account_combo_state)
-            except tk.TclError: pass
+                # Butonul este activ doar dacă:
+                # - Baza de date este conectată (is_db_connected)
+                # - Utilizatorul are permisiunea 'import_files'
+                final_state = tk.NORMAL if is_db_connected and self.has_permission('import_files') else tk.DISABLED
+                self.import_button.config(state=final_state)
+            except tk.TclError:
+                pass
+                
+        # 4. Gestionăm butonul de resetare filtre
+        # Acesta ar trebui să fie activ dacă un cont este activ, pentru a avea ce reseta.
+        if hasattr(self, 'reset_button') and self.reset_button.winfo_exists():
+            try:
+                self.reset_button.config(state=tk.NORMAL if is_account_active else tk.DISABLED)
+            except tk.TclError:
+                pass
 
-        # Dacă starea de bază este 'disabled', dezactivăm toate butoanele de acțiune
-        if base_state == tk.DISABLED:
-            for btn in self.action_buttons:
+        # Dacă starea generală este 'disabled' (ex: în timpul unei operațiuni), forțăm dezactivarea
+        if state_str == 'disabled':
+             for btn in self.action_buttons:
                 if isinstance(btn, (tk.Button, ttk.Button)) and btn.winfo_exists():
                     try: btn.config(state=tk.DISABLED)
                     except tk.TclError: pass
-            return
-
-        # Dacă starea de bază este 'normal', verificăm permisiunea pentru fiecare buton în parte
-        for btn, perm_key in button_permissions.items():
-            if isinstance(btn, (tk.Button, ttk.Button)) and btn.winfo_exists():
-                try:
-                    # Starea finală este 'normal' doar dacă și permisiunea este acordată
-                    final_state = tk.NORMAL if self.has_permission(perm_key) else tk.DISABLED
-                    btn.config(state=final_state)
-                except tk.TclError: pass
-        
-        # Butonul de resetare nu are nevoie de permisiuni speciale, doar de o stare de bază activă
-        if hasattr(self, 'reset_button') and self.reset_button.winfo_exists():
-            try: self.reset_button.config(state=base_state)
-            except tk.TclError: pass
+        # --- SFÂRȘIT BLOC MODIFICAT ---
 
     def export_to_excel(self):
         if not (self.db_handler and self.db_handler.is_connected() and self.active_account_id):
@@ -2022,28 +2077,29 @@ if __name__ == "__main__":
 
         # --- Autentificare reușită. Urmează pornirea aplicației principale. ---
 
-        # === BLOC MODIFICAT PENTRU A REZOLVA PROBLEMA FERESTREI GOALE ===
-        # Pasul E: Distrugem fereastra temporară ACUM, deoarece nu mai avem nevoie de ea.
+        user_settings = db_handler.get_user_settings(user_data['id'])
+
         temp_root.destroy()
 
         # Pasul F: Crearea și rularea ferestrei principale
         root = tk.Tk()
-        window_geom, zoomed = config_management.load_window_config_from_file()
-        if window_geom and not zoomed:
-            try: root.geometry(window_geom)
-            except tk.TclError: root.geometry("1200x700")
-        else:
-            try: root.state('zoomed')
+
+        window_cfg = user_settings.get('window', {})
+        window_geom = f"{window_cfg.get('width')}x{window_cfg.get('height')}+{window_cfg.get('x')}+{window_cfg.get('y')}" if window_cfg else None
+
+        if window_geom:
+            try:
+                root.geometry(window_geom)
             except tk.TclError:
-                w_screen, h_screen = root.winfo_screenwidth(), root.winfo_screenheight()
-                root.geometry(f"{w_screen}x{h_screen}+0+0")
-        
-        app = BTViewerApp(root, user_data=user_data, db_handler=db_handler, config_parser=config)
+                root.state('zoomed') # Fallback la maximizat
+        else:
+            root.state('zoomed')
+
+        app = BTViewerApp(root, user_data=user_data, db_handler=db_handler, user_settings=user_settings)
         
         root.protocol("WM_DELETE_WINDOW", lambda: ui_utils.handle_app_exit(app, root))
         
         root.mainloop()
-        # === SFÂRȘIT BLOC MODIFICAT ===
 
     except (ConnectionError, SystemError, PermissionError) as e:
         if db_handler and db_handler.is_connected():

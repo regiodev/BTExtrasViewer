@@ -96,17 +96,18 @@ def load_filters_from_parser(config_parser_obj):
     return filters
 
 def save_app_config(app_instance, window_details=None):
-    """Salvează configurația aplicației în CONFIG_FILE."""
+    """
+    NOUĂ VERSIUNE: Colectează toate setările și le salvează în baza de date
+    pentru utilizatorul curent. Salvează local doar credențialele DB.
+    """
+    # Pasul 1: Salvează local doar credențialele de conectare la DB.
     config = configparser.ConfigParser()
     if os.path.exists(CONFIG_FILE):
-        try:
-            config.read(CONFIG_FILE, encoding='utf-8')
-        except Exception as e:
-            logging.warning(f"Atenție: Nu s-a putut citi config.ini existent la salvare: {e}")
-
-    if not config.has_section('Database'): config.add_section('Database')
-
-    # --- BLOC MODIFICAT PENTRU A PRELUA CREDENȚIALELE CORECT ---
+        config.read(CONFIG_FILE, encoding='utf-8')
+    
+    if not config.has_section('Database'):
+        config.add_section('Database')
+    
     db_creds_to_save = {}
     if hasattr(app_instance, 'db_handler') and app_instance.db_handler and app_instance.db_handler.db_credentials:
         db_creds_to_save = app_instance.db_handler.db_credentials
@@ -116,73 +117,61 @@ def save_app_config(app_instance, window_details=None):
     config.set('Database', 'db_name', db_creds_to_save.get('database', ''))
     config.set('Database', 'db_user', db_creds_to_save.get('user', ''))
     config.set('Database', 'db_password', db_creds_to_save.get('password', ''))
-    # --- SFÂRȘIT BLOC MODIFICAT ---
-
-    if hasattr(app_instance, 'smtp_config') and app_instance.smtp_config:
-        if not config.has_section('SMTP'):
-            config.add_section('SMTP')
-
-        config.set('SMTP', 'server', app_instance.smtp_config.get('server', ''))
-        config.set('SMTP', 'port', str(app_instance.smtp_config.get('port', '')))
-        config.set('SMTP', 'security', app_instance.smtp_config.get('security', 'SSL/TLS'))
-        config.set('SMTP', 'sender_email', app_instance.smtp_config.get('sender_email', ''))
-        config.set('SMTP', 'user', app_instance.smtp_config.get('user', ''))
-        config.set('SMTP', 'password', app_instance.smtp_config.get('password', ''))
-
-    if not config.has_section('General'):
-        config.add_section('General')
-
-    active_id_to_save = ""
-    if hasattr(app_instance, 'active_account_id') and app_instance.active_account_id is not None:
-        active_id_to_save = str(app_instance.active_account_id)
-    config.set('General', 'active_account_id', active_id_to_save)
-
-    if not config.has_section('Filters'): config.add_section('Filters')
-    config.set('Filters', 'date_range_mode', str(app_instance.date_range_mode_var.get()))
-
-    start_date_val = None
-    if hasattr(app_instance, 'start_date') and app_instance.start_date.winfo_exists() and app_instance.start_date.get():
-        start_date_val = app_instance.start_date.get_date()
-
-    end_date_val = None
-    if hasattr(app_instance, 'end_date') and app_instance.end_date.winfo_exists() and app_instance.end_date.get():
-        end_date_val = app_instance.end_date.get_date()
-
-    if app_instance.date_range_mode_var.get():
-        config.set('Filters', 'start_date', start_date_val.strftime('%Y-%m-%d') if start_date_val else "")
-        config.set('Filters', 'end_date', end_date_val.strftime('%Y-%m-%d') if end_date_val else "")
-        config.set('Filters', 'nav_year', "")
-        config.set('Filters', 'nav_month_idx', "0")
-        config.set('Filters', 'nav_day', "0")
-    else:
-        config.set('Filters', 'start_date', "")
-        config.set('Filters', 'end_date', "")
-        config.set('Filters', 'nav_year', str(app_instance.nav_selected_year or ""))
-        config.set('Filters', 'nav_month_idx', str(app_instance.nav_selected_month_index or 0))
-        config.set('Filters', 'nav_day', str(app_instance.nav_selected_day or 0))
-
-    config.set('Filters', 'type', app_instance.type_var.get())
-    config.set('Filters', 'search_term', app_instance.search_var.get())
-    config.set('Filters', 'search_column', app_instance.search_column_var.get())
-
-    if hasattr(app_instance, 'tree') and app_instance.tree.winfo_exists():
-        if not config.has_section('ColumnWidths'): config.add_section('ColumnWidths')
-        for col_id in app_instance.treeview_display_columns:
-            try:
-                config.set('ColumnWidths', col_id, str(app_instance.tree.column(col_id, 'width')))
-            except Exception:
-                pass
-
-    if window_details:
-        if not config.has_section('Window'): config.add_section('Window')
-        for k, v_val in window_details.items():
-            config.set('Window', k, v_val)
 
     try:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as configfile:
             config.write(configfile)
     except Exception as e:
-        logging.error(f"Eroare la scrierea config.ini: {e}")
+        logging.error(f"Eroare la scrierea config.ini (doar DB creds): {e}")
+
+    # Pasul 2: Colectează TOATE setările UI într-un dicționar Python.
+    if not (app_instance.db_handler and app_instance.db_handler.is_connected()):
+        return # Nu putem salva setările utilizatorului fără conexiune
+
+    settings = {}
+
+    # Setări Fereastră
+    if window_details:
+        settings['window'] = window_details
+
+    # Setări SMTP
+    if hasattr(app_instance, 'smtp_config') and app_instance.smtp_config:
+        settings['smtp'] = app_instance.smtp_config
+
+    # Setări Generale
+    active_id_to_save = ""
+    if hasattr(app_instance, 'active_account_id') and app_instance.active_account_id is not None:
+        active_id_to_save = str(app_instance.active_account_id)
+    settings['general'] = {'active_account_id': active_id_to_save}
+
+    # Setări Filtre
+    filters = {
+        'date_range_mode': app_instance.date_range_mode_var.get(),
+        'type': app_instance.type_var.get(),
+        'search_term': app_instance.search_var.get(),
+        'search_column': app_instance.search_column_var.get()
+    }
+    if filters['date_range_mode']:
+        filters['start_date'] = app_instance.start_date.get_date().strftime('%Y-%m-%d') if hasattr(app_instance, 'start_date') and app_instance.start_date.winfo_exists() else ""
+        filters['end_date'] = app_instance.end_date.get_date().strftime('%Y-%m-%d') if hasattr(app_instance, 'end_date') and app_instance.end_date.winfo_exists() else ""
+    else:
+        filters['nav_year'] = str(app_instance.nav_selected_year or "")
+        filters['nav_month_idx'] = str(app_instance.nav_selected_month_index or 0)
+        filters['nav_day'] = str(app_instance.nav_selected_day or 0)
+    settings['filters'] = filters
+
+    # Setări Lățime Coloane
+    if hasattr(app_instance, 'tree') and app_instance.tree.winfo_exists():
+        widths = {}
+        for col_id in app_instance.treeview_display_columns:
+            try:
+                widths[col_id] = app_instance.tree.column(col_id, 'width')
+            except Exception:
+                pass
+        settings['column_widths'] = widths
+
+    # Pasul 3: Salvează dicționarul de setări în baza de date.
+    app_instance.db_handler.save_user_settings(app_instance.current_user['id'], settings)
 
 def load_window_config_from_file():
     """Încarcă configurația ferestrei din CONFIG_FILE."""

@@ -4,6 +4,7 @@ from mysql.connector import errorcode
 import logging
 import tkinter as tk
 from tkinter import simpledialog, messagebox
+import json
 
 # Importăm handler-ul de autentificare pentru a putea crea utilizatorul admin
 import auth_handler
@@ -75,9 +76,13 @@ CREATE TABLE IF NOT EXISTS utilizatori (
     salt VARCHAR(64) NOT NULL,
     nume_complet VARCHAR(100),
     activ BOOLEAN DEFAULT TRUE,
-    data_creare TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    data_creare TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    setari_ui JSON DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
+# Notă: Dacă versiunea de MariaDB/MySQL este mai veche și nu suportă tipul JSON,
+# puteți folosi TEXT. Tipul JSON este însă optim.
+
 DB_STRUCTURE_ROLURI = """
 CREATE TABLE IF NOT EXISTS roluri (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -187,6 +192,43 @@ class DatabaseHandler:
         """
         return self.fetch_all_dict(query)
 
+    def get_user_settings(self, user_id):
+        """
+        Preia setările UI ale utilizatorului din baza de date.
+        Returnează un dicționar Python sau un dicționar gol dacă nu există setări.
+        """
+        if not self.is_connected():
+            return {}
+        
+        raw_settings = self.fetch_scalar("SELECT setari_ui FROM utilizatori WHERE id = %s", (user_id,))
+        
+        if raw_settings:
+            try:
+                # Dedeserializează string-ul JSON într-un dicționar Python
+                return json.loads(raw_settings)
+            except json.JSONDecodeError:
+                logging.error(f"Eroare la decodarea setărilor JSON pentru user ID {user_id}")
+                return {} # Returnează gol în caz de eroare
+        return {} # Returnează gol dacă nu există setări
+
+    def save_user_settings(self, user_id, settings_dict):
+        """
+        Salvează dicționarul de setări UI pentru un utilizator, convertindu-l în JSON.
+        """
+        if not self.is_connected():
+            return False
+        
+        try:
+            # Serializează dicționarul Python într-un string JSON
+            settings_json = json.dumps(settings_dict, indent=4)
+            return self.execute_commit(
+                "UPDATE utilizatori SET setari_ui = %s WHERE id = %s",
+                (settings_json, user_id)
+            )
+        except TypeError as e:
+            logging.error(f"Eroare la serializarea setărilor în JSON pentru user ID {user_id}: {e}")
+            return False
+
     def connect(self):
         if not self.db_credentials:
             logging.error("Credentiale DB lipsesc. Conectare eșuată.")
@@ -216,17 +258,20 @@ class DatabaseHandler:
         logging.info("Verificare și configurare schemă bază de date...")
         
         all_tables_scripts = [
-            DB_STRUCTURE_CONTURI_BANCARE_MARIADB,
-            DB_STRUCTURE_TIPURI_TRANZACTII_MARIADB,
-            DB_STRUCTURE_TRANZACTII_V2_MARIADB, # Folosim V2
-            CREATE_TABLE_ISTORIC_IMPORTURI,
-            DB_STRUCTURE_UTILIZATORI,
-            DB_STRUCTURE_ROLURI,
-            DB_STRUCTURE_UTILIZATORI_ROLURI,
-            DB_STRUCTURE_ROLURI_PERMISIUNI,
-            DB_STRUCTURE_UTILIZATORI_CONTURI,
-            DB_STRUCTURE_JURNAL_ACTIUNI
-        ]
+                # Pasul 1: Tabele de bază, fără dependențe externe
+                DB_STRUCTURE_CONTURI_BANCARE_MARIADB,
+                DB_STRUCTURE_TIPURI_TRANZACTII_MARIADB,
+                DB_STRUCTURE_UTILIZATORI,
+                DB_STRUCTURE_ROLURI,
+                
+                # Pasul 2: Tabele care depind de cele de mai sus
+                DB_STRUCTURE_TRANZACTII_V2_MARIADB,     # Depinde de conturi_bancare, tipuri_tranzactii
+                CREATE_TABLE_ISTORIC_IMPORTURI,         # Depinde de conturi_bancare, utilizatori
+                DB_STRUCTURE_UTILIZATORI_ROLURI,        # Depinde de utilizatori, roluri
+                DB_STRUCTURE_ROLURI_PERMISIUNI,         # Depinde de roluri
+                DB_STRUCTURE_UTILIZATORI_CONTURI,       # Depinde de utilizatori, conturi_bancare
+                DB_STRUCTURE_JURNAL_ACTIUNI             # Depinde de utilizatori
+            ]
         
         try:
             with self.conn.cursor() as cursor:
