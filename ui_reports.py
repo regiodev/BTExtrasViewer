@@ -47,6 +47,9 @@ class CashFlowReportDialog(tk.Toplevel):
         self.initial_context = initial_context or {}
         self.visible_tx_codes = self.initial_context.get('visible_tx_codes', [])
         
+        # --- NOU: Salvăm permisiunea de acces la tranzacții ---
+        self.tranzactie_acces = self.initial_context.get('tranzactie_acces', 'toate')
+        
         self.smtp_config = smtp_config or {}
         
         self.title("Analiză Flux de Numerar (Cash Flow)")
@@ -384,59 +387,79 @@ class CashFlowReportDialog(tk.Toplevel):
         selected_account_id = selected_account['id_cont']
         account_currency = selected_account.get('valuta', 'RON')
         start_date, end_date = None, None
-        if self.initial_context and 'start_date' in self.initial_context and 'end_date' in self.initial_context:
-            start_date, end_date = self.initial_context.get('start_date'), self.initial_context.get('end_date')
-            self.initial_context = None 
-        else:
-            period = self.period_var.get(); today = date.today()
-            if period == "Luna Curentă": start_date, end_date = today.replace(day=1), (today.replace(day=1) + relativedelta(months=1)) - relativedelta(days=1)
-            elif period == "Luna Trecută": last_month_end = today.replace(day=1) - relativedelta(days=1); start_date, end_date = last_month_end.replace(day=1), last_month_end
-            elif period == "Anul Curent": start_date, end_date = today.replace(day=1, month=1), today.replace(day=31, month=12)
-            elif period == "Anul Trecut": last_year = today.year - 1; start_date, end_date = date(last_year, 1, 1), date(last_year, 12, 31)
-            elif period == "Ultimele 12 Luni": start_date, end_date = today - relativedelta(months=12), today
-            elif period == "Interval Personalizat":
-                try:
-                    start_date, end_date = self.start_date_entry.get_date(), self.end_date_entry.get_date()
-                    if start_date > end_date: messagebox.showerror("Eroare Interval", "Data de început nu poate fi după data de sfârșit.", parent=self); return
-                except Exception as e: messagebox.showerror("Eroare Dată", f"Data introdusă este invalidă: {e}", parent=self); return
-        if not start_date or not end_date: messagebox.showerror("Eroare", "Intervalul de date nu a putut fi determinat.", parent=self); return
+        
+        period = self.period_var.get(); today = date.today()
+        if period == "Luna Curentă": start_date, end_date = today.replace(day=1), (today.replace(day=1) + relativedelta(months=1)) - relativedelta(days=1)
+        elif period == "Luna Trecută": last_month_end = today.replace(day=1) - relativedelta(days=1); start_date, end_date = last_month_end.replace(day=1), last_month_end
+        elif period == "Anul Curent": start_date, end_date = today.replace(day=1, month=1), today.replace(day=31, month=12)
+        elif period == "Anul Trecut": last_year = today.year - 1; start_date, end_date = date(last_year, 1, 1), date(last_year, 12, 31)
+        elif period == "Ultimele 12 Luni": start_date, end_date = today - relativedelta(months=12), today
+        elif period == "Interval Personalizat":
+            try:
+                start_date, end_date = self.start_date_entry.get_date(), self.end_date_entry.get_date()
+                if start_date > end_date: messagebox.showerror("Eroare Interval", "Data de început nu poate fi după data de sfârșit.", parent=self); return
+            except Exception as e: messagebox.showerror("Eroare Dată", f"Data introdusă este invalidă: {e}", parent=self); return
+        
+        if not start_date or not end_date:
+             # Fallback la contextul inițial dacă există, altfel eroare
+            initial_start_date = self.initial_context.get('start_date')
+            initial_end_date = self.initial_context.get('end_date')
+            if initial_start_date and initial_end_date:
+                start_date, end_date = initial_start_date, initial_end_date
+            else:
+                messagebox.showerror("Eroare", "Intervalul de date nu a putut fi determinat.", parent=self); return
+
         duration_days = (end_date - start_date).days
         granularity = 'daily' if duration_days <= 62 else 'monthly'
         
-        # Sincronizăm datele din DateEntry pentru a le avea disponibile la trimiterea email-ului
         self.start_date_entry.set_date(start_date)
         self.end_date_entry.set_date(end_date)
         
+        # --- NOU: Construim clauza SQL pentru accesul la tranzacții ---
+        access_sql, access_params = "", []
+        if self.tranzactie_acces == 'credit':
+            access_sql = " AND tip = %s "
+            access_params.append('credit')
+        elif self.tranzactie_acces == 'debit':
+            access_sql = " AND tip = %s "
+            access_params.append('debit')
+
+        base_query = f"FROM tranzactii WHERE id_cont_fk = %s AND data BETWEEN %s AND %s {access_sql}"
+        
         if granularity == 'monthly':
-            sql = """SELECT YEAR(data) as an, MONTH(data) as luna,
-                       SUM(CASE WHEN tip = 'credit' THEN suma ELSE 0 END) as total_intrari,
-                       SUM(CASE WHEN tip = 'debit' THEN suma ELSE 0 END) as total_iesiri
-                FROM tranzactii WHERE id_cont_fk = %s AND data BETWEEN %s AND %s """
+            sql = "SELECT YEAR(data) as an, MONTH(data) as luna, " \
+                  "SUM(CASE WHEN tip = 'credit' THEN suma ELSE 0 END) as total_intrari, " \
+                  f"SUM(CASE WHEN tip = 'debit' THEN suma ELSE 0 END) as total_iesiri {base_query}"
         else: # 'daily'
-            sql = """SELECT data,
-                       SUM(CASE WHEN tip = 'credit' THEN suma ELSE 0 END) as total_intrari,
-                       SUM(CASE WHEN tip = 'debit' THEN suma ELSE 0 END) as total_iesiri
-                FROM tranzactii WHERE id_cont_fk = %s AND data BETWEEN %s AND %s """
-        params = [selected_account_id, start_date, end_date]
+            sql = "SELECT data, " \
+                  "SUM(CASE WHEN tip = 'credit' THEN suma ELSE 0 END) as total_intrari, " \
+                  f"SUM(CASE WHEN tip = 'debit' THEN suma ELSE 0 END) as total_iesiri {base_query}"
+
+        params = [selected_account_id, start_date, end_date] + access_params
+        
         if self.visible_tx_codes:
             placeholders = ', '.join(['%s'] * len(self.visible_tx_codes))
             sql += f" AND cod_tranzactie_fk IN ({placeholders})"
             params.extend(self.visible_tx_codes)
-        else:
-            sql += " AND 1=0"
         
         sql += " GROUP BY 1, 2 ORDER BY 1, 2;" if granularity == 'monthly' else " GROUP BY 1 ORDER BY 1;"
+        
         results = self.db_handler.fetch_all_dict(sql, tuple(params))
         grand_totals = { 'intrari': 0.0, 'iesiri': 0.0, 'sold': 0.0 }
         if results:
             grand_totals['intrari'] = sum(float(r['total_intrari']) for r in results)
             grand_totals['iesiri'] = sum(float(r['total_iesiri']) for r in results)
             grand_totals['sold'] = grand_totals['intrari'] - grand_totals['iesiri']
-        self.current_report_data = results; self.current_report_totals = grand_totals
-        self.current_report_granularity = granularity; self.current_report_currency = account_currency
+        
+        self.current_report_data = results
+        self.current_report_totals = grand_totals
+        self.current_report_granularity = granularity
+        self.current_report_currency = account_currency
+        
         self.export_excel_button.config(state="normal" if results else "disabled")
         self.export_pdf_button.config(state="normal" if results else "disabled")
         self.send_email_button.config(state="normal" if results else "disabled")
+        
         self._populate_table(results, account_currency, granularity, grand_totals)
         self._update_chart(results, account_currency, granularity)
 
@@ -503,13 +526,16 @@ class CashFlowReportDialog(tk.Toplevel):
         self.fig.tight_layout()
         self.canvas.draw()
 
-# ... (Clasa BalanceEvolutionReportDialog rămâne neschimbată) ...
 class BalanceEvolutionReportDialog(tk.Toplevel):
     def __init__(self, parent, db_handler, smtp_config, report_config):
         super().__init__(parent)
         self.db_handler = db_handler
         self.smtp_config = smtp_config or {}
         self.report_config = report_config
+        
+        # --- NOU: Salvăm permisiunea de acces la tranzacții ---
+        self.tranzactie_acces = self.report_config.get('tranzactie_acces', 'toate')
+        
         self.report_data = []
         self.title(f"Evoluție Sold - {self.report_config['account_name']}")
         self.geometry("1000x700")
@@ -559,36 +585,49 @@ class BalanceEvolutionReportDialog(tk.Toplevel):
         granularity = self.report_config['granularity']
         visible_tx_codes = self.report_config.get('visible_tx_codes', [])
 
-        filter_clause = ""
-        filter_params = []
+        # --- NOU: Construim clauzele SQL pentru acces și vizibilitate coduri ---
+        access_sql, access_params = "", []
+        if self.tranzactie_acces == 'credit':
+            access_sql = " AND tip = %s "
+            access_params.append('credit')
+        elif self.tranzactie_acces == 'debit':
+            access_sql = " AND tip = %s "
+            access_params.append('debit')
+
+        visibility_sql = ""
+        visibility_params = []
         if visible_tx_codes:
             placeholders = ', '.join(['%s'] * len(visible_tx_codes))
-            filter_clause = f" AND cod_tranzactie_fk IN ({placeholders})"
-            filter_params.extend(visible_tx_codes)
-        else:
-            filter_clause = " AND 1=0"
+            visibility_sql = f" AND cod_tranzactie_fk IN ({placeholders})"
+            visibility_params.extend(visible_tx_codes)
 
+        # Combinăm filtrele
+        filter_sql = access_sql + visibility_sql
+        
+        # Aplicăm filtrele la interogarea pentru soldul inițial
         initial_balance_query = f"""
             SELECT SUM(CASE WHEN tip = 'credit' THEN suma ELSE -suma END)
             FROM tranzactii
             WHERE id_cont_fk = %s AND data < %s
-            {filter_clause}
+            {filter_sql}
         """
-        initial_balance_params = [account_id, start_date] + filter_params
+        initial_balance_params = [account_id, start_date] + access_params + visibility_params
         initial_balance_result = self.db_handler.fetch_scalar(initial_balance_query, tuple(initial_balance_params))
         initial_balance = float(initial_balance_result) if initial_balance_result is not None else 0.0
         logging.debug(f"DEBUG_REPORT (filtrat): Sold inițial calculat (înainte de {start_date}): {initial_balance}")
 
+        # Aplicăm filtrele la interogarea pentru tranzacțiile din perioadă
         transactions_query = f"""
             SELECT data, suma, tip
             FROM tranzactii
             WHERE id_cont_fk = %s AND data BETWEEN %s AND %s
-            {filter_clause}
+            {filter_sql}
             ORDER BY data ASC, id ASC
         """
-        transactions_params = [account_id, start_date, end_date] + filter_params
+        transactions_params = [account_id, start_date, end_date] + access_params + visibility_params
         transactions = self.db_handler.fetch_all_dict(transactions_query, tuple(transactions_params))
-
+        
+        # ... (restul metodei, care procesează datele, rămâne neschimbat) ...
         if not transactions and initial_balance == 0:
             self.report_data = []
         else:
@@ -778,32 +817,29 @@ Email generat automat de {APP_NAME} v{APP_VERSION}
                     logging.warning(f"Nu s-a putut șterge fișierul PDF temporar: {temp_pdf_path}. Eroare: {e}")
 
 class TransactionAnalysisReportDialog(tk.Toplevel):
-    # ==================== BLOC MODIFICAT ====================
     def __init__(self, parent, db_handler, initial_context=None, smtp_config=None):
         super().__init__(parent)
         self.db_handler = db_handler
         self.initial_context = initial_context or {}
-        # NOU: Stocăm configurația SMTP
-        self.smtp_config = smtp_config or {}
-    # ======================================================
         
+        # --- NOU: Salvăm permisiunea de acces la tranzacții și configurația SMTP ---
+        self.tranzactie_acces = self.initial_context.get('tranzactie_acces', 'toate')
+        self.smtp_config = smtp_config or self.initial_context.get('smtp_config', {})
+            
         self.title("Analiză Detaliată a Tranzacțiilor")
         self.geometry("1100x750")
         self.transient(parent)
 
-        # Variabile pentru filtre
         self.start_date_var = tk.StringVar()
         self.end_date_var = tk.StringVar()
         self.granularity_var = tk.StringVar(value="Zilnic")
         self.type_var = tk.StringVar(value="Ambele")
         
-        # Atribute pentru a stoca datele și widget-urile
         self.report_data = []
         self.transaction_codes_listbox = None
         self.results_tree = None
 
         self._create_widgets()
-        
         self._populate_filters_with_initial_context()
         self._setup_bindings()
         self.update_idletasks()
@@ -1223,36 +1259,38 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
         start_date = self.start_date_entry.get_date()
         end_date = self.end_date_entry.get_date()
         granularity = self.granularity_var.get()
-        transaction_type = self.type_var.get()
+        transaction_type_filter = self.type_var.get() # Filtrul din UI-ul raportului
 
         selected_codes = [code for code, var in self.transaction_type_vars.items() if var.get()]
         
-        logging.debug(f"[DEBUG] Lista 'selected_codes' rezultată: {selected_codes}\n")
-
-        # Verificăm dacă există coduri selectate
         if not selected_codes:
             self.report_data = []
             self._populate_treeview()
             self._update_graph() 
-            
-            # === BLOC DE COD ADĂUGAT PENTRU DEZACTIVARE ===
-            # Dacă nu sunt date, dezactivăm butoanele
             self.export_excel_button.config(state="disabled")
             self.export_pdf_button.config(state="disabled")
             self.send_email_button.config(state="disabled")
-            # ===============================================
             return
 
-        # Construirea dinamică a interogării SQL...
         if granularity == "Zilnic": select_period_col, group_by_period = "data", "data"
         elif granularity == "Lunar": select_period_col, group_by_period = "DATE_FORMAT(data, '%Y-%m')", "perioada"
         else: select_period_col, group_by_period = "YEAR(data)", "perioada"
 
         sql = f"SELECT {select_period_col} as perioada, cod_tranzactie_fk, tip, SUM(suma) as total_suma, COUNT(*) as nr_tranzactii FROM tranzactii WHERE id_cont_fk = %s AND data BETWEEN %s AND %s"
         params = [self.initial_context['active_account_id'], start_date, end_date]
+        
+        # --- NOU: Aplicăm filtrul de acces al utilizatorului ---
+        if self.tranzactie_acces == 'credit':
+            sql += " AND tip = %s"
+            params.append('credit')
+        elif self.tranzactie_acces == 'debit':
+            sql += " AND tip = %s"
+            params.append('debit')
 
-        if transaction_type != "Ambele":
-            sql += " AND tip = %s"; params.append('credit' if transaction_type == "Doar Credit" else 'debit')
+        # Aplicăm și filtrul din UI-ul raportului
+        if transaction_type_filter != "Ambele":
+            sql += " AND tip = %s"
+            params.append('credit' if transaction_type_filter == "Doar Credit" else 'debit')
 
         placeholders = ', '.join(['%s'] * len(selected_codes))
         sql += f" AND cod_tranzactie_fk IN ({placeholders})"
@@ -1260,18 +1298,14 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
         sql += f" GROUP BY {group_by_period}, cod_tranzactie_fk, tip ORDER BY perioada DESC, cod_tranzactie_fk"
 
         self.report_data = self.db_handler.fetch_all_dict(sql, tuple(params))
-
-        # Populăm interfața
+        
         self._populate_treeview()
         self._update_graph()
 
-        # === BLOC DE COD ADĂUGAT PENTRU ACTIVARE/DEZACTIVARE ===
-        # Setăm starea butoanelor în funcție de existența datelor în raport
         final_state = "normal" if self.report_data else "disabled"
         self.export_excel_button.config(state=final_state)
         self.export_pdf_button.config(state=final_state)
         self.send_email_button.config(state=final_state)
-        # ======================================================
 
     def _update_graph(self):
         """Desenează un grafic cu bare stivuite, RESPECTÂND filtrul de tip (D/C)."""

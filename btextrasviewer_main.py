@@ -23,7 +23,7 @@ from db_handler import DatabaseHandler, MariaDBConfigDialog # Corectat, db_handl
 import file_processing 
 from file_processing import extract_iban_from_mt940, threaded_import_worker, threaded_export_worker
 import ui_utils
-from ui_dialogs import AccountManagerDialog, AccountEditDialog, TransactionTypeManagerDialog, SMTPConfigDialog, BalanceReportConfigDialog, LoginDialog, UserManagerDialog
+from ui_dialogs import AccountManagerDialog, AccountEditDialog, TransactionTypeManagerDialog, SMTPConfigDialog, BalanceReportConfigDialog, LoginDialog, UserManagerDialog, RoleManagerDialog
 
 # NOU: Importăm handler-ul de autentificare. Vom avea nevoie de el în pasul următor.
 import auth_handler
@@ -168,32 +168,38 @@ class BTViewerApp:
             return True
         # Verifică dacă permisiunea există în lista de permisiuni a utilizatorului
         return permission_key in self.current_user.get('permissions', [])
-    
+  
     # VECHI: Metodele init_step1_read_config, connect_to_db, 
     # init_step2_connect, init_step2b_prompt_credentials, și init_step3_check_table
     # pot fi ȘTERSE din clasa BTViewerApp, deoarece logica lor a fost mutată
     # în secvența de pornire.
 
+    # --- METODE NOI PENTRU GESTIONARE ROLURI/UTILIZATORI ---
+    def manage_roles(self):
+        """Deschide dialogul de gestionare a rolurilor și permisiunilor."""
+        if self.has_permission('manage_roles'):
+            RoleManagerDialog(self.master, self.db_handler)
+    
     def manage_users(self):
         """Deschide dialogul de gestionare a utilizatorilor."""
-        UserManagerDialog(self.master, self.db_handler, self.current_user)
+        if self.has_permission('manage_users'):
+            UserManagerDialog(self.master, self.db_handler, self.current_user)
 
     def configure_smtp(self):
         dialog = SMTPConfigDialog(self.master, initial_config=self.smtp_config)
         if dialog.result:
             self.smtp_config = dialog.result
-            config_management.save_app_config(self) # Re-folosim functia existenta
+            config_management.save_app_config(self)
             messagebox.showinfo("Configurare SMTP", "Setările SMTP au fost salvate.", parent=self.master)
 
     def manage_transaction_types(self):
         if not (self.db_handler and self.db_handler.is_connected()):
             messagebox.showwarning("Fără Conexiune", "Trebuie să fiți conectat la baza de date.", parent=self.master)
             return
-
-        dialog = TransactionTypeManagerDialog(self.master, self.db_handler)
+        TransactionTypeManagerDialog(self.master, self.db_handler)
         self._load_visible_transaction_types()
         self.refresh_ui_for_account_change()
-       
+           
     def show_cash_flow_report(self):
         if not (self.db_handler and self.db_handler.is_connected()):
             messagebox.showwarning("Fără Conexiune", "Vă rugăm asigurați o conexiune la baza de date pentru a genera rapoarte.", parent=self.master)
@@ -243,7 +249,8 @@ class BTViewerApp:
             'active_account_id': self.active_account_id,
             'start_date': start_date,
             'end_date': end_date,
-            'visible_tx_codes': self.visible_tx_codes
+            'visible_tx_codes': self.visible_tx_codes,
+            'tranzactie_acces': self.current_user.get('tranzactie_acces', 'toate')
         }
         
         report_dialog = CashFlowReportDialog(self.master, self.db_handler, self.accounts_list, initial_context=initial_context, smtp_config=self.smtp_config)
@@ -262,28 +269,17 @@ class BTViewerApp:
         if config_dialog.result:
             report_config = config_dialog.result
             report_config['visible_tx_codes'] = self.visible_tx_codes
+            report_config['tranzactie_acces'] = self.current_user.get('tranzactie_acces', 'toate')
             BalanceEvolutionReportDialog(self.master, self.db_handler, self.smtp_config, report_config)
 
     def _populate_audit_log_tab(self):
-        """Populează tab-ul Jurnal Acțiuni cu date din baza de date."""
-        # Verificăm dacă tree-ul există (a fost creat pe baza permisiunii)
-        if not hasattr(self, 'audit_log_tree'):
-            return
-
-        for item in self.audit_log_tree.get_children():
-            self.audit_log_tree.delete(item)
-
+        if not hasattr(self, 'audit_log_tree'): return
+        for item in self.audit_log_tree.get_children(): self.audit_log_tree.delete(item)
         log_entries = self.db_handler.get_audit_log_entries()
         if log_entries:
             for entry in log_entries:
-                # Formatăm data pentru o afișare mai prietenoasă
                 timestamp_str = entry['timestamp'].strftime('%d-%m-%Y %H:%M:%S') if entry.get('timestamp') else ''
-                values = (
-                    timestamp_str,
-                    entry.get('username', 'N/A'),
-                    entry.get('actiune', ''),
-                    entry.get('detalii', '')
-                )
+                values = (timestamp_str, entry.get('username', 'N/A'), entry.get('actiune', ''), entry.get('detalii', ''))
                 self.audit_log_tree.insert("", "end", values=values)
 
     def show_transaction_analysis_report(self):
@@ -328,7 +324,8 @@ class BTViewerApp:
             'visible_tx_codes': self.visible_tx_codes,
             'accounts_list': self.accounts_list,
             'db_handler': self.db_handler,
-            'currency': currency
+            'currency': currency,
+            'tranzactie_acces': self.current_user.get('tranzactie_acces', 'toate')
         }
 
         TransactionAnalysisReportDialog(self.master, self.db_handler, initial_context)
@@ -339,24 +336,16 @@ class BTViewerApp:
     
     def init_step4_populate_ui(self):
         if not self.master.winfo_exists(): return
-
         final_title = f"{APP_NAME} v{APP_VERSION} (client-server multicont)  |  {APP_COPYRIGHT}"
         self.master.title(final_title)
-
         if hasattr(self, 'status_label') and self.status_label.winfo_exists():
             self.status_label.config(text="Se încarcă configurația conturilor...")
         if self.master.winfo_exists(): self.master.update_idletasks()
-
         self._populate_account_selector() 
-
         if self.master.winfo_exists():
-            # --- MODIFICARE AICI: Am eliminat self.config ---
             self.master.after(300, lambda: self._schedule_ui_population_steps("(initial setup)"))
-
-            self._populate_history_tab()
-
-            # Populăm și jurnalul de acțiuni la pornire
-            self._populate_audit_log_tab()
+            if self.has_permission('view_import_history'): self._populate_history_tab()
+            if self.has_permission('view_audit_log'): self._populate_audit_log_tab()
 
     def setup_ui(self):
         default_font_size = 10
@@ -490,10 +479,11 @@ class BTViewerApp:
             self.tree.heading(col, text=header_text, command=lambda c=col: self.toggle_sort(c))
         
         self.tree.bind("<Double-1>", self.show_transaction_details)
-        history_tab = ttk.Frame(main_content_notebook)
-        main_content_notebook.add(history_tab, text=" Istoric Importuri ")
-        history_cols = ("fisier", "data", "utilizator", "noi", "ignorate", "cont")
-        self.history_tree = ttk.Treeview(history_tab, columns=history_cols, show="headings")
+        if self.has_permission('view_import_history'):
+            history_tab = ttk.Frame(main_content_notebook)
+            main_content_notebook.add(history_tab, text=" Istoric Importuri ")
+            history_cols = ("fisier", "data", "utilizator", "noi", "ignorate", "cont")
+            self.history_tree = ttk.Treeview(history_tab, columns=history_cols, show="headings")
         self.history_tree.heading("fisier", text="Nume Fișier")
         self.history_tree.heading("data", text="Data Import")
         self.history_tree.heading("utilizator", text="Utilizator")
@@ -513,8 +503,6 @@ class BTViewerApp:
         if self.has_permission('view_audit_log'):
             audit_log_tab = ttk.Frame(main_content_notebook)
             main_content_notebook.add(audit_log_tab, text=" Jurnal Acțiuni ")
-            
-            # Creăm un Treeview pentru a afișa jurnalul
             audit_cols = ("timestamp", "username", "actiune", "detalii")
             self.audit_log_tree = ttk.Treeview(audit_log_tab, columns=audit_cols, show="headings")
             
@@ -555,8 +543,8 @@ class BTViewerApp:
         self.sold_label.grid(row=0, column=5, sticky="w", padx=5)
         
         self.action_buttons = [self.report_button, self.balance_report_button, self.analysis_button, self.export_button, self.import_button, self.reset_button]
-        
         self._toggle_action_buttons('disabled')
+        self._on_search_column_changed()
 
     def _setup_nav_tree_columns(self):
         self.nav_tree.column("#0", width=200, minwidth=180, stretch=tk.YES)
@@ -565,45 +553,65 @@ class BTViewerApp:
         self.nav_tree.tag_configure('month_node', font=('TkDefaultFont', 9))
         self.nav_tree.tag_configure('day_node', font=('TkDefaultFont', 9, 'italic'))
 
+    def manage_roles(self):
+        """Deschide dialogul de gestionare a rolurilor și permisiunilor."""
+        # Aici vom folosi noua clasă RoleManagerDialog
+        from ui_dialogs import RoleManagerDialog # Import local pentru a evita circular dependencies
+        dialog = RoleManagerDialog(self.master, self.db_handler)
+
     def create_menu(self):
         default_font_family = 'TkDefaultFont'
         default_font_size = 10
         menubar = tk.Menu(self.master)
         self.master.config(menu=menubar)
 
-        # --- Meniul Fișier ---
+        # --- Meniul Fișier (simplificat) ---
         file_menu = tk.Menu(menubar, tearoff=0, font=(default_font_family, default_font_size))
-        menubar.add_cascade(label="Fișier", menu=file_menu, font=(default_font_family, default_font_size))
-
-        # Opțiuni condiționate de permisiuni
-        if self.has_permission('manage_system_settings'):
-            file_menu.add_command(label="Configurează Conexiunea DB...", command=self.handle_db_config_from_menu)
-            file_menu.add_separator()
-        
-        if self.has_permission('manage_accounts'):
-            file_menu.add_command(label="Gestionare Conturi Bancare...", command=self.manage_accounts)
-            file_menu.add_separator()
-        
-        if self.has_permission('manage_system_settings'):
-            file_menu.add_command(label="Gestionare Tipuri Tranzacții...", command=self.manage_transaction_types)
-            file_menu.add_separator()
-            file_menu.add_command(label="Configurează SMTP (Email)...", command=self.configure_smtp)
-            file_menu.add_separator()
-
-        if self.has_permission('manage_users'):
-            file_menu.add_command(label="Gestionare Utilizatori...", command=self.manage_users)
-            file_menu.add_separator()
-
+        menubar.add_cascade(label="Fișier", menu=file_menu)
         file_menu.add_command(label="Ieșire", command=lambda: ui_utils.handle_app_exit(self, self.master))
+        
+        # --- Meniul Administrare (actualizat cu noile permisiuni) ---
+        admin_menu = tk.Menu(menubar, tearoff=0, font=(default_font_family, default_font_size))
+        
+        # --- MODIFICAT: Actualizăm lista de permisiuni care determină vizibilitatea meniului ---
+        admin_permissions = [
+            'manage_roles', 'manage_users', 'manage_accounts', 'manage_transaction_types',
+            'configure_db', 'configure_smtp'
+        ]
+        if any(self.has_permission(p) for p in admin_permissions):
+            menubar.add_cascade(label="Administrare", menu=admin_menu)
 
-        # --- Meniul Rapoarte ---
+        if self.has_permission('manage_roles'):
+            admin_menu.add_command(label="Gestionare Roluri și Permisiuni...", command=self.manage_roles)
+        if self.has_permission('manage_users'):
+            admin_menu.add_command(label="Gestionare Utilizatori...", command=self.manage_users)
+        
+        # --- MODIFICARE: Logica separatorului rămâne validă ---
+        if (self.has_permission('manage_roles') or self.has_permission('manage_users')) and \
+           (self.has_permission('manage_accounts') or self.has_permission('manage_transaction_types') or self.has_permission('configure_db') or self.has_permission('configure_smtp')):
+            admin_menu.add_separator()
+
+        if self.has_permission('manage_accounts'):
+            admin_menu.add_command(label="Gestionare Conturi Bancare...", command=self.manage_accounts)
+        if self.has_permission('manage_transaction_types'):
+            admin_menu.add_command(label="Gestionare Tipuri Tranzacții...", command=self.manage_transaction_types)
+        
+        # --- MODIFICAT: Folosim noile chei de permisiune ---
+        if self.has_permission('configure_db'):
+            admin_menu.add_command(label="Configurează Conexiunea DB...", command=self.handle_db_config_from_menu)
+        if self.has_permission('configure_smtp'):
+            admin_menu.add_command(label="Configurează SMTP (Email)...", command=self.configure_smtp)
+
+        # --- Meniul Rapoarte (neschimbat) ---
         reports_menu = tk.Menu(menubar, tearoff=0, font=(default_font_family, default_font_size))
-        # Adăugăm meniul doar dacă utilizatorul are voie să vadă rapoarte
         if self.has_permission('view_reports'):
-            menubar.add_cascade(label="Rapoarte", menu=reports_menu, font=(default_font_family, default_font_size))
-            reports_menu.add_command(label="Analiză Flux de Numerar...", command=self.show_cash_flow_report)
-            reports_menu.add_command(label="Evoluție Sold Cont...", command=self.show_balance_report)
-            reports_menu.add_command(label="Analiză Detaliată Tranzacții...", command=self.show_transaction_analysis_report)
+            menubar.add_cascade(label="Rapoarte", menu=reports_menu)
+            if self.has_permission('run_report_cashflow'):
+                reports_menu.add_command(label="Analiză Flux de Numerar...", command=self.show_cash_flow_report)
+            if self.has_permission('run_report_balance_evolution'):
+                reports_menu.add_command(label="Evoluție Sold Cont...", command=self.show_balance_report)
+            if self.has_permission('run_report_transaction_analysis'):
+                reports_menu.add_command(label="Analiză Detaliată Tranzacții...", command=self.show_transaction_analysis_report)
     
     def _on_account_selected(self, event=None):
         if self._prevent_on_account_selected_trigger: return
@@ -1165,10 +1173,7 @@ class BTViewerApp:
         self.on_filter_change()
 
     def refresh_table(self, start_date_override=None, end_date_override=None):
-        if not (self.db_handler and self.db_handler.is_connected() and
-                hasattr(self, 'tree') and self.tree.winfo_exists() and 
-                self.active_account_id is not None):
-            
+        if not (self.db_handler and self.db_handler.is_connected() and hasattr(self, 'tree') and self.tree.winfo_exists() and self.active_account_id is not None):
             if hasattr(self, 'tree') and self.tree.winfo_exists():
                 for item in self.tree.get_children(""): self.tree.delete(item)
             self._update_status_label(); self._calculate_and_update_totals()
@@ -1181,17 +1186,16 @@ class BTViewerApp:
         query = f"SELECT {select_clause} FROM tranzactii WHERE id_cont_fk = %s"
         params = [self.active_account_id]
         
-        # ---- BLOC DE COD CORECTAT ----
-        # Acest bloc va adăuga filtrul doar dacă există coduri vizibile de filtrat.
-        # Dacă lista este goală, nu se adaugă niciun filtru, permițând afișarea tuturor tranzacțiilor.
+        # --- FILTRARE ACCES (CREDIT/DEBIT) ---
+        access_sql, access_params = self._get_access_filter_sql()
+        query += access_sql
+        params.extend(access_params)
+
         if self.visible_tx_codes:
             placeholders = ', '.join(['%s'] * len(self.visible_tx_codes))
-            # Am corectat numele coloanei din 'cod_tranzactie' în 'cod_tranzactie_fk'
             query += f" AND cod_tranzactie_fk IN ({placeholders})"
             params.extend(self.visible_tx_codes)
-        # Am eliminat complet secțiunea 'else' care adăuga "AND 1=0".
-        # ---- SFÂRȘIT BLOC CORECTAT ----
-
+        
         start_date_to_use, end_date_to_use = start_date_override, end_date_override
         if start_date_to_use is None:
             if self.date_range_mode_var.get():
@@ -1482,14 +1486,19 @@ class BTViewerApp:
                 self.nav_tree.insert("", "end", text="Selectați un cont", iid="no_data_root_disconnected_or_no_account")
             return
 
-        query_years = "SELECT DISTINCT YEAR(data) as an FROM tranzactii WHERE data IS NOT NULL AND id_cont_fk = %s"
-        params_years = [self.active_account_id]
+        # Obținem filtrul de acces o singură dată
+        access_sql, access_params = self._get_access_filter_sql()
+        visibility_sql, visibility_params = "", []
         if self.visible_tx_codes:
             placeholders = ', '.join(['%s'] * len(self.visible_tx_codes))
-            # Am corectat numele coloanei și am eliminat clauza 'else'
-            query_years += f" AND cod_tranzactie_fk IN ({placeholders})"
-            params_years.extend(self.visible_tx_codes)
-        query_years += " ORDER BY an DESC"
+            visibility_sql = f" AND cod_tranzactie_fk IN ({placeholders}) "
+            visibility_params.extend(self.visible_tx_codes)
+        
+        # Combinăm filtrele pentru a le folosi în toate interogările
+        filter_sql = access_sql + visibility_sql
+
+        query_years = f"SELECT DISTINCT YEAR(data) as an FROM tranzactii WHERE data IS NOT NULL AND id_cont_fk = %s {filter_sql} ORDER BY an DESC"
+        params_years = [self.active_account_id] + access_params + visibility_params
         
         years_data_dicts = self.db_handler.fetch_all_dict(query_years, tuple(params_years))
 
@@ -1500,14 +1509,48 @@ class BTViewerApp:
             year_val = year_dict.get('an')
             if year_val is None: continue
             
-            query_count = "SELECT COUNT(*) FROM tranzactii WHERE YEAR(data) = %s AND id_cont_fk = %s"
-            params_count = [year_val, self.active_account_id]
-            # Am eliminat clauza 'else' pentru a număra corect toate tranzacțiile 
-            # atunci când niciun filtru de vizibilitate nu este activ.
-            if self.visible_tx_codes:
-                placeholders = ', '.join(['%s'] * len(self.visible_tx_codes))
-                query_count += f" AND cod_tranzactie_fk IN ({placeholders})"
-                params_count.extend(self.visible_tx_codes)
+            # Folosim filtrul combinat și pentru a număra tranzacțiile
+            query_count = f"SELECT COUNT(*) FROM tranzactii WHERE YEAR(data) = %s AND id_cont_fk = %s {filter_sql}"
+            params_count = [year_val, self.active_account_id] + access_params + visibility_params
+            
+            year_tx_count = self.db_handler.fetch_scalar(query_count, tuple(params_count)) or 0
+
+            if year_tx_count > 0:
+                year_display_text = f"Anul {year_val} ({year_tx_count} tranzacții)"
+                year_node_iid = f"year_{year_val}"
+                if self.nav_tree.winfo_exists():
+                    self.nav_tree.insert("", "end", text=year_display_text, iid=year_node_iid, open=False, tags=('year_node',))
+                    self.nav_tree.insert(year_node_iid, "end", text="  (Încarcă lunile...)", iid=f"placeholder_months_{year_val}", tags=('month_node',))
+
+    def _populate_nav_tree(self):
+        if hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists():
+            for item in self.nav_tree.get_children(""): self.nav_tree.delete(item)
+        else: return
+
+        if not (self.db_handler and self.db_handler.is_connected() and self.active_account_id):
+            if hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists():
+                self.nav_tree.insert("", "end", text="Selectați un cont", iid="no_data_root_disconnected_or_no_account")
+            return
+
+        # Folosim noile funcții helper pentru a construi filtrele
+        access_sql, access_params = self._get_access_filter_sql()
+        visibility_sql, visibility_params = self._get_visibility_filter_sql()
+        filter_sql = access_sql + visibility_sql
+        
+        query_years = f"SELECT DISTINCT YEAR(data) as an FROM tranzactii WHERE data IS NOT NULL AND id_cont_fk = %s {filter_sql} ORDER BY an DESC"
+        params_years = [self.active_account_id] + access_params + visibility_params
+        
+        years_data_dicts = self.db_handler.fetch_all_dict(query_years, tuple(params_years))
+
+        if not years_data_dicts:
+            if self.nav_tree.winfo_exists(): self.nav_tree.insert("", "end", text="Nicio tranzacție vizibilă", iid="no_data_root"); return
+
+        for year_dict in years_data_dicts:
+            year_val = year_dict.get('an')
+            if year_val is None: continue
+            
+            query_count = f"SELECT COUNT(*) FROM tranzactii WHERE YEAR(data) = %s AND id_cont_fk = %s {filter_sql}"
+            params_count = [year_val, self.active_account_id] + access_params + visibility_params
             
             year_tx_count = self.db_handler.fetch_scalar(query_count, tuple(params_count)) or 0
 
@@ -1526,25 +1569,23 @@ class BTViewerApp:
         
         is_open_event = event is not None and hasattr(event, 'type') and str(event.type) == 'TreeviewOpen'
 
-        filter_clause, params_filter = "", []
-        if self.visible_tx_codes:
-            placeholders = ', '.join(['%s'] * len(self.visible_tx_codes))
-            # Am corectat numele coloanei și am eliminat clauza 'else'
-            filter_clause = f" AND cod_tranzactie_fk IN ({placeholders})"
-            params_filter.extend(self.visible_tx_codes)
+        # Folosim funcțiile helper pentru a construi filtrele
+        access_sql, access_params = self._get_access_filter_sql()
+        visibility_sql, visibility_params = self._get_visibility_filter_sql()
+        filter_sql = access_sql + visibility_sql
 
         if item_id.startswith("year_") and "month" not in item_id:
             year_str = item_id.split('_')[1]; year_val = int(year_str)
             placeholder_iid = f"placeholder_months_{year_str}"
             if self.nav_tree.exists(placeholder_iid):
                 self.nav_tree.delete(placeholder_iid)
-                query = f"SELECT DISTINCT MONTH(data) as luna FROM tranzactii WHERE YEAR(data) = %s AND id_cont_fk = %s {filter_clause} ORDER BY luna ASC"
-                params = [year_val, self.active_account_id] + params_filter
+                query = f"SELECT DISTINCT MONTH(data) as luna FROM tranzactii WHERE YEAR(data) = %s AND id_cont_fk = %s {filter_sql} ORDER BY luna ASC"
+                params = [year_val, self.active_account_id] + access_params + visibility_params
                 months_dicts = self.db_handler.fetch_all_dict(query, tuple(params))
                 for month_dict in months_dicts:
                     month_idx = month_dict['luna']
-                    query_count = f"SELECT COUNT(*) FROM tranzactii WHERE YEAR(data) = %s AND MONTH(data) = %s AND id_cont_fk = %s {filter_clause}"
-                    params_count = [year_val, month_idx, self.active_account_id] + params_filter
+                    query_count = f"SELECT COUNT(*) FROM tranzactii WHERE YEAR(data) = %s AND MONTH(data) = %s AND id_cont_fk = %s {filter_sql}"
+                    params_count = [year_val, month_idx, self.active_account_id] + access_params + visibility_params
                     month_tx_count = self.db_handler.fetch_scalar(query_count, tuple(params_count)) or 0
                     if month_tx_count > 0:
                         month_name = self.reverse_month_map_for_nav.get(month_idx, f"Luna {month_idx}")
@@ -1557,21 +1598,31 @@ class BTViewerApp:
             placeholder_iid = f"placeholder_days_{year_val}_{month_idx:02d}"
             if self.nav_tree.exists(placeholder_iid):
                 self.nav_tree.delete(placeholder_iid)
-                query = f"SELECT DISTINCT DAY(data) as zi FROM tranzactii WHERE YEAR(data) = %s AND MONTH(data) = %s AND id_cont_fk = %s {filter_clause} ORDER BY zi ASC"
-                params = [year_val, month_idx, self.active_account_id] + params_filter
+                query = f"SELECT DISTINCT DAY(data) as zi FROM tranzactii WHERE YEAR(data) = %s AND MONTH(data) = %s AND id_cont_fk = %s {filter_sql} ORDER BY zi ASC"
+                params = [year_val, month_idx, self.active_account_id] + access_params + visibility_params
                 days_dicts = self.db_handler.fetch_all_dict(query, tuple(params))
                 for day_dict in days_dicts:
                     day_val = day_dict['zi']
-                    query_count_day = f"SELECT COUNT(*) FROM tranzactii WHERE YEAR(data) = %s AND MONTH(data) = %s AND DAY(data) = %s AND id_cont_fk = %s {filter_clause}"
-                    params_count_day = [year_val, month_idx, day_val, self.active_account_id] + params_filter
+                    query_count_day = f"SELECT COUNT(*) FROM tranzactii WHERE YEAR(data) = %s AND MONTH(data) = %s AND DAY(data) = %s AND id_cont_fk = %s {filter_sql}"
+                    params_count_day = [year_val, month_idx, day_val, self.active_account_id] + access_params + visibility_params
                     day_tx_count = self.db_handler.fetch_scalar(query_count_day, tuple(params_count_day)) or 0
                     if day_tx_count > 0:
                         day_display_text = f"    {day_val:02d} ({day_tx_count} tranzacții)"
                         day_iid = f"{item_id}_day_{day_val:02d}"
                         self.nav_tree.insert(item_id, "end", text=day_display_text, iid=day_iid, tags=('day_node',))
 
+        # Această linie trebuie să fie în interiorul metodei, la final
         if not is_open_event and self.nav_tree.exists(item_id):
             self.nav_tree.item(item_id, open=not self.nav_tree.item(item_id, "open"))
+
+    def _get_visibility_filter_sql(self):
+        """Helper pentru a genera clauza SQL pentru vizibilitatea codurilor de tranzacție."""
+        if self.visible_tx_codes:
+            placeholders = ', '.join(['%s'] * len(self.visible_tx_codes))
+            sql = f" AND cod_tranzactie_fk IN ({placeholders}) "
+            params = self.visible_tx_codes
+            return sql, params
+        return "", []
 
     def _toggle_filter_mode(self):
         if self._programmatic_change: return
@@ -1697,20 +1748,22 @@ class BTViewerApp:
             query = "SELECT COUNT(*) FROM tranzactii WHERE id_cont_fk = %s"
             params = [self.active_account_id]
             
-            # Logica a fost corectată aici
+            # --- FILTRARE ACCES (CREDIT/DEBIT) ---
+            access_sql, access_params = self._get_access_filter_sql()
+            query += access_sql
+            params.extend(access_params)
+
             if self.visible_tx_codes:
                 placeholders = ', '.join(['%s'] * len(self.visible_tx_codes))
-                # 1. Numele coloanei a fost corectat
                 query += f" AND cod_tranzactie_fk IN ({placeholders})"
                 params.extend(self.visible_tx_codes)
-            # 2. Blocul 'else' a fost eliminat complet.
-            #    Dacă 'self.visible_tx_codes' este goală, condiția 'if' este falsă
-            #    și nu se adaugă niciun filtru suplimentar, ceea ce este corect.
-
+            
             self.total_transaction_count = self.db_handler.fetch_scalar(query, tuple(params)) or 0
         else:
             self.total_transaction_count = 0
         self._update_status_label()
+
+    
             
     def set_date_range_to_db_bounds(self, called_by_nav_tree_logic=False):
         min_date_db, max_date_db = None, None
@@ -1851,54 +1904,46 @@ class BTViewerApp:
             window_to_close.destroy()
 
     def _toggle_action_buttons(self, state_str):
-        # --- BLOC COMPLET MODIFICAT PENTRU A PERMITE IMPORTUL FĂRĂ CONT ACTIV ---
-        
-        # Starea de bază: există o conexiune la DB?
+        """Versiune actualizată care folosește chei de permisiuni granulare."""
         is_db_connected = self.db_handler and self.db_handler.is_connected()
-        
-        # Starea contului: există un cont activ selectat?
         is_account_active = is_db_connected and self.active_account_id is not None
         
-        # 1. Gestionăm starea combobox-ului de conturi
         if hasattr(self, 'account_selector_combo') and self.account_selector_combo.winfo_exists():
             try:
-                # Activăm combobox-ul doar dacă sunt conturi în listă și DB e conectat
                 account_combo_state = "readonly" if is_db_connected and self.accounts_list else "disabled"
                 self.account_selector_combo.config(state=account_combo_state)
-            except tk.TclError:
-                pass
+            except tk.TclError: pass
 
-        # 2. Gestionăm butoanele care necesită OBLIGATORIU un cont activ
-        buttons_requiring_account = {
-            self.report_button: 'view_reports',
-            self.balance_report_button: 'view_reports',
-            self.analysis_button: 'view_reports',
-            self.export_button: 'export_data'
+        # Maparea butoanelor la permisiunile lor specifice
+        button_permissions = {
+            self.report_button: 'run_report_cashflow',
+            self.balance_report_button: 'run_report_balance_evolution',
+            self.analysis_button: 'run_report_transaction_analysis',
+            self.export_button: 'export_data',
+            self.import_button: 'import_files'
         }
-        
-        for btn, perm_key in buttons_requiring_account.items():
+
+        for btn, perm_key in button_permissions.items():
             if isinstance(btn, (tk.Button, ttk.Button)) and btn.winfo_exists():
                 try:
-                    # Butonul este activ doar dacă:
-                    # - Un cont este activ (is_account_active)
-                    # - Utilizatorul are permisiunea necesară
-                    final_state = tk.NORMAL if is_account_active and self.has_permission(perm_key) else tk.DISABLED
+                    # Butonul de import nu necesită cont activ, celelalte da
+                    req_account = (btn != self.import_button)
+                    can_enable = (is_account_active or not req_account) and is_db_connected
+                    
+                    final_state = tk.NORMAL if can_enable and self.has_permission(perm_key) else tk.DISABLED
                     btn.config(state=final_state)
-                except tk.TclError:
-                    pass
-
-        # 3. Gestionăm butonul de IMPORT separat
-        # Acesta trebuie să fie activ dacă DB este conectat și utilizatorul are permisiunea,
-        # CHIAR DACĂ nu există un cont activ.
-        if hasattr(self, 'import_button') and self.import_button.winfo_exists():
+                except tk.TclError: pass
+        
+        if hasattr(self, 'reset_button') and self.reset_button.winfo_exists():
             try:
-                # Butonul este activ doar dacă:
-                # - Baza de date este conectată (is_db_connected)
-                # - Utilizatorul are permisiunea 'import_files'
-                final_state = tk.NORMAL if is_db_connected and self.has_permission('import_files') else tk.DISABLED
-                self.import_button.config(state=final_state)
-            except tk.TclError:
-                pass
+                self.reset_button.config(state=tk.NORMAL if is_account_active else tk.DISABLED)
+            except tk.TclError: pass
+
+        if state_str == 'disabled':
+             for btn in self.action_buttons:
+                if isinstance(btn, (tk.Button, ttk.Button)) and btn.winfo_exists():
+                    try: btn.config(state=tk.DISABLED)
+                    except tk.TclError: pass
                 
         # 4. Gestionăm butonul de resetare filtre
         # Acesta ar trebui să fie activ dacă un cont este activ, pentru a avea ce reseta.
@@ -1915,6 +1960,15 @@ class BTViewerApp:
                     try: btn.config(state=tk.DISABLED)
                     except tk.TclError: pass
         # --- SFÂRȘIT BLOC MODIFICAT ---
+
+    def _get_access_filter_sql(self):
+        """Helper pentru a genera clauza SQL și parametrii pentru accesul la tranzacții."""
+        user_tx_access = self.current_user.get('tranzactie_acces', 'toate')
+        if user_tx_access == 'credit':
+            return " AND tip = %s", ['credit']
+        elif user_tx_access == 'debit':
+            return " AND tip = %s", ['debit']
+        return "", []
 
     def export_to_excel(self):
         if not (self.db_handler and self.db_handler.is_connected() and self.active_account_id):
