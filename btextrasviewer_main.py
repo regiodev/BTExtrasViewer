@@ -1426,14 +1426,12 @@ class BTViewerApp:
             return
 
         filters = self.user_settings.get('filters', {})
-
-        # Sincronizăm starea checkbox-ului și a controalelor de dată
+        
         self.date_range_mode_var.set(filters.get('date_range_mode', False))
         self._toggle_filter_mode()
         if self.master.winfo_exists():
             self.master.update_idletasks()
 
-        # Logica de restaurare a selecției, adaptată de la metoda veche
         if filters.get('date_range_mode'):
             start_str = filters.get('start_date', "")
             end_str = filters.get('end_date', "")
@@ -1447,32 +1445,68 @@ class BTViewerApp:
                 except (ValueError, TypeError):
                     self.set_date_range_to_db_bounds()
             else:
-                self.set_date_range_to_db_bounds()
+                 self.set_date_range_to_db_bounds()
         else:  # Mod Navigare
             def restore_nav_selection_logic():
+                """Funcție completă pentru a restaura selecția și a expanda arborele."""
                 if not (hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists()): return
+                
                 s_year_str = filters.get('nav_year', "")
                 s_month_idx_str = filters.get('nav_month_idx', "0")
                 s_day_str = filters.get('nav_day', "0")
 
-                item_to_focus_iid, item_to_select_iid = None, None
+                item_to_select_iid = None
                 if s_year_str:
                     try:
                         s_year, s_month_idx, s_day = int(s_year_str), int(s_month_idx_str), int(s_day_str)
                         year_iid = f"year_{s_year}"
+                        
+                        # Verificăm dacă anul salvat există
                         if self.nav_tree.exists(year_iid):
-                            item_to_focus_iid = item_to_select_iid = year_iid
-                            # ... (restul logicii de expandare și selecție rămâne identică)
-                    except (ValueError, TypeError):
-                        item_to_focus_iid, item_to_select_iid = None, None
+                            item_to_select_iid = year_iid
+                            
+                            # Dacă avem și o lună salvată, încercăm să o selectăm
+                            if s_month_idx != 0:
+                                # Programatic, expandăm anul pentru a încărca lunile
+                                self.nav_tree.item(year_iid, open=True)
+                                self._on_nav_tree_expand_or_double_click(item_to_expand=year_iid)
+                                self.master.update_idletasks() # Forțăm actualizarea UI
 
-                if item_to_select_iid and self.nav_tree.exists(item_to_select_iid): 
+                                month_iid = f"{year_iid}_month_{s_month_idx:02d}"
+                                if self.nav_tree.exists(month_iid):
+                                    item_to_select_iid = month_iid
+
+                                    # Dacă avem și o zi salvată, încercăm să o selectăm
+                                    if s_day != 0:
+                                        # Programatic, expandăm luna pentru a încărca zilele
+                                        self.nav_tree.item(month_iid, open=True)
+                                        self._on_nav_tree_expand_or_double_click(item_to_expand=month_iid)
+                                        self.master.update_idletasks() # Forțăm actualizarea UI
+
+                                        day_iid = f"{month_iid}_day_{s_day:02d}"
+                                        if self.nav_tree.exists(day_iid):
+                                            item_to_select_iid = day_iid
+                                            
+                    except (ValueError, TypeError):
+                        item_to_select_iid = None
+                
+                # Dacă am găsit un element de selectat, îl selectăm
+                if item_to_select_iid: 
                     self.nav_tree.selection_set(item_to_select_iid)
                     self.nav_tree.focus(item_to_select_iid)
                     self.nav_tree.see(item_to_select_iid)
                 else:
-                    self._apply_nav_selection_to_datepickers_and_refresh()
+                    # Dacă nu, selectăm primul element din listă ca fallback
+                    children = self.nav_tree.get_children("")
+                    if children and children[0] not in ["no_data_root", "no_data_root_disconnected_or_no_account"]:
+                        first_item = children[0]
+                        self.nav_tree.selection_set(first_item)
+                        self.nav_tree.focus(first_item)
+                        self.nav_tree.see(first_item)
+                    else:
+                        self._apply_nav_selection_to_datepickers_and_refresh()
 
+            # Programăm execuția logicii de restaurare cu o mică întârziere
             if self.master.winfo_exists():
                 self.master.after(250, restore_nav_selection_logic)
 
