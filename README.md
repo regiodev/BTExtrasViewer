@@ -65,7 +65,7 @@ Aplicația implementează o arhitectură **client-server** clasică:
 
 ## Tehnologii Folosite
 
-* **Limbaj:** Python 3.9+
+* **Limbaj:** Python
 * **Interfață Grafică (GUI):** Tkinter, Ttk, Tkinter.scrolledtext, tkcalendar
 * **Bază de Date:** MariaDB / MySQL
 * **Conector Bază de Date:** `mysql-connector-python`, `SQLAlchemy` (utilizat de Pandas)
@@ -92,91 +92,107 @@ Urmați acești pași pentru a pune în funcțiune aplicația.
 
 ### Pasul 1: Clonarea Repository-ului
 
-```bash
-git clone [https://github.com/your-username/BTExtrasViewer.git](https://github.com/your-username/BTExtrasViewer.git)
-cd BTExtrasViewer
+    git clone https://github.com/your-username/BTExtrasViewer.git
+    cd BTExtrasViewer
 
 ### Pasul 2: Crearea Bazei de Date
+
 Conectați-vă la serverul de baze de date și creați o bază de date goală pentru aplicație.
 
-SQL
-CREATE DATABASE btextras_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+    CREATE DATABASE btextras_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
-Notă: Puteți alege orice nume pentru baza de date.
+*Notă: Puteți alege orice nume pentru baza de date.*
 
 ### Pasul 3: Instalarea Dependințelor
+
 Este recomandat să creați un mediu virtual pentru a izola dependințele proiectului.
 
-# Crearea și activarea unui mediu virtual (pe Linux/macOS)
-python3 -m venv venv
-source venv/bin/activate
+    # Crearea și activarea unui mediu virtual (pe Linux/macOS)
+    python3 -m venv venv
+    source venv/bin/activate
 
-# Pe Windows
-py -m venv venv
-venv\Scripts\activate
+    # Pe Windows
+    py -m venv venv
+    venv\Scripts\activate
 
-# Instalați toate bibliotecile necesare folosind fișierul requirements.txt (dacă există) sau direct cu pip:
+Instalați toate bibliotecile necesare:
 
-```bash
-pip install mysql-connector-python pandas openpyxl matplotlib numpy tkcalendar reportlab sqlalchemy
+    pip install mysql-connector-python pandas openpyxl matplotlib numpy tkcalendar reportlab sqlalchemy
 
-# Utilizare
-Prima Lansare și Configurarea Conexiunii:
-La prima lansare, aplicația nu va găsi fișierul de configurare config.ini sau nu se va putea conecta. Va afișa automat o fereastră de dialog pentru a introduce credențialele bazei de date (MariaDBConfigDialog).
+---
 
-Host: Adresa IP sau numele serverului de baze de date.
-Port: Portul serverului (de obicei 3306).
-Nume Bază Date: Numele bazei de date create la pasul anterior (ex: btextras_db).
-Utilizator DB: Utilizatorul cu drepturi pe acea bază de date.
-Parolă DB: Parola utilizatorului.
-Crearea Automată a Schemei:
-După o conexiune reușită, aplicația va verifica și va crea automat toate tabelele necesare (check_and_setup_database_schema).
+## Utilizare
 
-Autentificare:
-Va apărea fereastra de login (LoginDialog). La prima rulare absolută, aplicația creează un utilizator implicit:
+1.  **Prima Lansare și Configurarea Conexiunii:**
+    La prima lansare, aplicația nu se va putea conecta și va afișa automat o fereastră de dialog pentru a introduce credențialele bazei de date (`MariaDBConfigDialog`).
+    * **Host:** Adresa IP sau numele serverului de baze de date.
+    * **Port:** Portul serverului (de obicei `3306`).
+    * **Nume Bază Date:** Numele bazei de date create la pasul anterior (ex: `btextras_db`).
+    * **Utilizator DB:** Utilizatorul cu drepturi pe acea bază de date.
+    * **Parolă DB:** Parola utilizatorului.
 
-Utilizator: admin
-Parolă: admin123
-Este CRUCIAL să schimbați această parolă imediat după prima autentificare.
+2.  **Crearea Automată a Schemei:**
+    După o conexiune reușită, aplicația va verifica și va crea automat toate tabelele necesare (`check_and_setup_database_schema`).
 
-Lansarea Aplicației:
-Executați scriptul principal din rădăcina proiectului:
+3.  **Autentificare:**
+    Va apărea fereastra de login (`LoginDialog`). La prima rulare absolută, aplicația creează un utilizator implicit (`_seed_initial_data`):
+    * **Utilizator:** `admin`
+    * **Parolă:** `admin123`
 
-```bash
-python btextrasviewer_main.py
+    *Este **CRUCIAL** să schimbați această parolă imediat după prima autentificare.*
 
-Sistemul de Roluri și Permisiuni (Analiză Detaliată)
+4.  **Lansarea Aplicației:**
+    Executați scriptul principal din rădăcina proiectului:
+
+        python btextrasviewer_main.py
+
+---
+
+## Sistemul de Roluri și Permisiuni (Analiză Detaliată)
+
 Securitatea și accesul granular sunt pilonii centrali ai arhitecturii. Sistemul este implementat pe două niveluri distincte pentru a asigura o protecție completă.
 
-Structura Bazei de Date
+### Structura Bazei de Date
+
 Fundația sistemului este formată din 5 tabele interconectate:
+* `utilizatori`: Stochează datele de login, setările `JSON` și dreptul de acces la tranzacții (`credit`/`debit`/`toate`).
+* `roluri`: Definește rolurile (ex: `Administrator`, `Operator Date`).
+* `utilizatori_roluri`: Leagă utilizatorii de roluri.
+* `roluri_permisiuni`: Asociază rolurilor chei de permisiuni granulare (ex: `'manage_users'`, `'import_files'`).
+* `utilizatori_conturi_permise`: Leagă direct utilizatorii de conturile bancare pe care au dreptul să le vadă.
 
-utilizatori: Stochează datele de login și setările JSON.
-roluri: Definește rolurile (ex: Administrator, Operator Date).
-utilizatori_roluri: Leagă utilizatorii de roluri.
-roluri_permisiuni: Asociază rolurilor chei de permisiuni granulare (ex: 'manage_users', 'import_files').
-utilizatori_conturi_permise: Leagă direct utilizatorii de conturile bancare pe care au dreptul să le vadă.
-Niveluri de Securitate
-Nivelul 1: Controlul Interfeței Grafice (UI)
-Acest nivel determină ce funcționalități poate vedea și accesa un utilizator în aplicație.
+### Niveluri de Securitate
 
-Mecanism: Metoda has_permission(permission_key) din btextrasviewer_main.py este folosită pentru a verifica drepturile utilizatorului logat.
-Implementare: Meniurile, opțiunile de meniu și butoanele principale sunt afișate sau activate condiționat. De exemplu, meniul "Administrare" și opțiunile sale sunt vizibile doar pentru utilizatorii cu permisiuni precum manage_roles sau manage_accounts. Rolul special Administrator are o permisiune 'all_permissions' care îi oferă acces total.
-Nivelul 2: Controlul Accesului la Date (Data-Level)
-Acest nivel, cel mai important, determină ce date poate vedea un utilizator, chiar dacă are acces la o funcționalitate.
+#### Nivelul 1: Controlul Interfeței Grafice (UI)
 
-Restricționare la Nivel de Cont Bancar:
+Acest nivel determină **ce funcționalități poate vedea și accesa** un utilizator în aplicație.
 
-Mecanism: Tabela utilizatori_conturi_permise.
-Implementare: Lista de conturi afișată în meniul dropdown este populată doar cu conturile la care utilizatorul curent are acces explicit. Astfel, un utilizator nu poate vizualiza sau rula rapoarte pentru un cont care nu i-a fost asignat.
-Restricționare la Nivel de Tip de Tranzacție (Credit/Debit):
+* **Mecanism:** Metoda `has_permission(permission_key)` din `btextrasviewer_main.py` este folosită pentru a verifica drepturile utilizatorului logat.
+* **Implementare:** Meniurile, opțiunile de meniu și butoanele principale sunt afișate sau activate condiționat. De exemplu, meniul "Administrare" și opțiunile sale sunt vizibile doar pentru utilizatorii cu permisiuni precum `manage_roles` sau `manage_accounts`. Rolul special **Administrator** are o permisiune `'all_permissions'` care îi oferă acces total.
 
-Mecanism: Coloana tranzactie_acces din tabela utilizatori, care poate fi 'toate', 'credit' sau 'debit'.
-Implementare: Aceasta este o formă de Row-Level Security. Toate interogările SQL care extrag tranzacții (refresh_table, rapoartele) sunt modificate dinamic prin metoda _get_access_filter_sql(). Aceasta adaugă la clauza WHERE o condiție suplimentară (AND tip = 'credit' sau AND tip = 'debit'), filtrând datele direct la sursă, în baza de date. Un utilizator cu acces doar la 'debit' nu va vedea niciodată tranzacțiile de tip 'credit', indiferent de filtrele pe care le aplică în interfață.
-Contribuții
+#### Nivelul 2: Controlul Accesului la Date (Data-Level)
+
+Acest nivel, cel mai important, determină **ce date poate vedea** un utilizator, chiar dacă are acces la o funcționalitate.
+
+1.  **Restricționare la Nivel de Cont Bancar:**
+    * **Mecanism:** Tabela `utilizatori_conturi_permise`.
+    * **Implementare:** Lista de conturi afișată în meniul dropdown este populată doar cu conturile la care utilizatorul curent are acces explicit (`_populate_account_selector`). Astfel, un utilizator nu poate vizualiza sau rula rapoarte pentru un cont care nu i-a fost asignat.
+
+2.  **Restricționare la Nivel de Tip de Tranzacție (Credit/Debit):**
+    * **Mecanism:** Coloana `tranzactie_acces` din tabela `utilizatori`, care poate fi `'toate'`, `'credit'` sau `'debit'`.
+    * **Implementare:** Aceasta este o formă de *Row-Level Security*. Toate interogările SQL care extrag tranzacții (`refresh_table`, rapoartele) sunt modificate dinamic prin metoda `_get_access_filter_sql()`. Aceasta adaugă la clauza `WHERE` o condiție suplimentară (`AND tip = 'credit'` sau `AND tip = 'debit'`), filtrând datele direct la sursă, în baza de date.
+
+---
+
+## Contribuții
+
 Contribuțiile sunt binevenite! Vă rugăm să deschideți un "issue" pentru a discuta despre modificările pe care doriți să le faceți sau un "pull request" dacă ați implementat deja o funcționalitate sau o corecție.
 
-Licență
-Acest proiect este licențiat sub licența MIT. Consultați fișierul LICENSE pentru mai multe detalii.
+---
 
-BTExtrasViewer - © 2024 Regio Development. Toate drepturile rezervate.
+## Licență
+
+Acest proiect este licențiat sub licența MIT. Consultați fișierul `LICENSE` pentru mai multe detalii.
+
+---
+*BTExtrasViewer - © 2025 Regio Development. Toate drepturile rezervate.*
