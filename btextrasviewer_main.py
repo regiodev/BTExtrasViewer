@@ -23,7 +23,7 @@ from db_handler import DatabaseHandler, MariaDBConfigDialog # Corectat, db_handl
 import file_processing 
 from file_processing import extract_iban_from_mt940, threaded_import_worker, threaded_export_worker
 import ui_utils
-from ui_dialogs import AccountManagerDialog, AccountEditDialog, TransactionTypeManagerDialog, SMTPConfigDialog, BalanceReportConfigDialog, LoginDialog, UserManagerDialog, RoleManagerDialog
+from ui_dialogs import AccountManagerDialog, AccountEditDialog, TransactionTypeManagerDialog, SMTPConfigDialog, BalanceReportConfigDialog, LoginDialog, UserManagerDialog, RoleManagerDialog, SwiftCodeManagerDialog, CurrencyManagerDialog
 
 # NOU: Importăm handler-ul de autentificare. Vom avea nevoie de el în pasul următor.
 import auth_handler
@@ -131,8 +131,6 @@ class BTViewerApp:
         
         # Lățimea coloanelor a fost deja încărcată în self.loaded_column_widths
         # și este folosită în setup_ui.
-        
-        # Starea ferestrei (geometria) a fost deja aplicată la creare în blocul if __name__ == "__main__":
 
         # --- NOU: Apelăm funcția de sincronizare AICI ---
         # Asigură că starea checkbox-ului reflectă valoarea încărcată în combobox.
@@ -473,7 +471,10 @@ class BTViewerApp:
 
         for col in self.treeview_display_columns:
             width = self.loaded_column_widths.get(col, default_widths.get(col, 100))
-            self.tree.column(col, anchor="w", width=width, minwidth=40)
+            
+            # Aici este modificarea: definim alinierea pe baza numelui coloanei
+            anchor_pos = "e" if col == "suma" else "center" if col == "tip" else "w"
+            self.tree.column(col, anchor=anchor_pos, width=width, minwidth=40)
 
             header_text = col.upper() if col == 'cif' else col.capitalize().replace("_", " ")
             self.tree.heading(col, text=header_text, command=lambda c=col: self.toggle_sort(c))
@@ -553,6 +554,22 @@ class BTViewerApp:
         self.nav_tree.tag_configure('month_node', font=('TkDefaultFont', 9))
         self.nav_tree.tag_configure('day_node', font=('TkDefaultFont', 9, 'italic'))
 
+    def manage_currencies(self):
+        """Deschide dialogul de gestionare a valutelor."""
+        if not (self.db_handler and self.db_handler.is_connected()):
+            messagebox.showwarning("Fără Conexiune", "Trebuie să fiți conectat la baza de date.", parent=self.master)
+            return
+        # Asigurați-vă că CurrencyManagerDialog este importat la începutul fișierului
+        CurrencyManagerDialog(self.master, self.db_handler)
+    
+    def manage_swift_codes(self):
+        """Deschide dialogul de gestionare a descrierilor SWIFT."""
+        if not (self.db_handler and self.db_handler.is_connected()):
+            messagebox.showwarning("Fără Conexiune", "Trebuie să fiți conectat la baza de date.", parent=self.master)
+            return
+        
+        SwiftCodeManagerDialog(self.master, self.db_handler)
+
     def manage_roles(self):
         """Deschide dialogul de gestionare a rolurilor și permisiunilor."""
         # Aici vom folosi noua clasă RoleManagerDialog
@@ -596,6 +613,16 @@ class BTViewerApp:
         if self.has_permission('manage_transaction_types'):
             admin_menu.add_command(label="Gestionare Tipuri Tranzacții...", command=self.manage_transaction_types)
         
+        if self.has_permission('manage_swift_codes'):
+            admin_menu.add_command(label="Gestionare Descrieri Standard SWIFT...", command=self.manage_swift_codes)
+
+        if self.has_permission('manage_currencies'):
+            admin_menu.add_command(label="Gestionare Valute...", command=self.manage_currencies)
+
+        if (self.has_permission('manage_roles') or self.has_permission('manage_users')) and \
+           (self.has_permission('manage_accounts') or self.has_permission('manage_transaction_types') or self.has_permission('configure_db') or self.has_permission('configure_smtp')):
+            admin_menu.add_separator()
+
         # --- MODIFICAT: Folosim noile chei de permisiune ---
         if self.has_permission('configure_db'):
             admin_menu.add_command(label="Configurează Conexiunea DB...", command=self.handle_db_config_from_menu)
@@ -764,8 +791,9 @@ class BTViewerApp:
         if not (self.db_handler and self.db_handler.is_connected()):
             if self.master.winfo_exists(): messagebox.showwarning("Fără Conexiune", "Conectați-vă la DB.", parent=self.master)
             return
-        dialog = AccountManagerDialog(self.master, self.db_handler) 
-        self.master.wait_window(dialog.top) 
+        
+        AccountManagerDialog(self.master, self.db_handler) 
+        
         self._populate_account_selector() 
 
     def _ask_user_to_select_account_for_import(self, parent_window, prompt_message):
@@ -1859,7 +1887,16 @@ class BTViewerApp:
         except ValueError: return
 
         if not (self.db_handler and self.db_handler.is_connected()): messagebox.showerror("Eroare DB", "Nu există conexiune.", parent=self.master); return
-        transaction_data = self.db_handler.fetch_one_dict("SELECT * FROM tranzactii WHERE id = %s", (item_id,))
+        
+        # Interogare SQL modificată pentru a include descrierea tipului de tranzacție
+        sql_query = """
+            SELECT t.*, tt.descriere_tip
+            FROM tranzactii t
+            LEFT JOIN tipuri_tranzactii tt ON t.cod_tranzactie_fk = tt.cod
+            WHERE t.id = %s
+        """
+        transaction_data = self.db_handler.fetch_one_dict(sql_query, (item_id,))
+
         if not transaction_data: messagebox.showerror("Eroare", f"Tranzacția ID: {item_id} nu a fost găsită.", parent=self.master); return
         
         active_account_currency = "RON"
@@ -1877,6 +1914,7 @@ class BTViewerApp:
         
         # O listă de câmpuri de afișat
         fields_to_show = [("ID:", "id"), ("Dată:", "data"), ("Sumă:", "suma"), ("Tip:", "tip"),
+                          ("Descriere Tip Tranzacție:", "descriere_tip"), # <<< LINIE NOUĂ ADĂUGATĂ
                           ("Beneficiar:", "beneficiar"), ("CIF:", "cif"), ("Factură:", "factura"),
                           ("TID:", "tid"), ("RRN:", "rrn"),("PAN Mascat:", "pan"),
                           ("Descriere completă:", "descriere"), ("Observații (editabil):", "observatii")]
@@ -1905,7 +1943,8 @@ class BTViewerApp:
                 elif col_name == "tip":
                     font_style = ('TkDefaultFont', 10, 'bold')
                     text_color = '#006400' if value == 'credit' else '#8B0000'
-                elif col_name == "descriere": wrap_len = 450
+                elif col_name in ["descriere", "beneficiar", "descriere_tip"]:
+                    wrap_len = 450
                 
                 value_label = ttk.Label(main_frame, text=value_text, font=font_style, foreground=text_color)
                 if wrap_len > 0: value_label.config(wraplength=wrap_len, justify='left')
@@ -2171,6 +2210,20 @@ if __name__ == "__main__":
 
         # Pasul F: Crearea și rularea ferestrei principale
         root = tk.Tk()
+
+        try:
+            # Construiește calea către icon într-un mod robust, indiferent de unde este rulat scriptul
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            icon_path = os.path.join(script_dir, 'assets', 'BT_logo.ico')
+            
+            # Verifică dacă fișierul există înainte de a-l seta
+            if os.path.exists(icon_path):
+                root.iconbitmap(icon_path)
+            else:
+                logging.warning(f"Fișierul icon nu a fost găsit la calea: {icon_path}")
+        except Exception as e:
+            # Prinde orice altă eroare (ex: tkinter.TclError dacă formatul e invalid)
+            logging.error(f"Nu s-a putut seta iconul aplicației: {e}")
 
         window_cfg = user_settings.get('window', {})
         window_geom = f"{window_cfg.get('width')}x{window_cfg.get('height')}+{window_cfg.get('x')}+{window_cfg.get('y')}" if window_cfg else None

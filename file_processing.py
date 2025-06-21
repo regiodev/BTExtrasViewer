@@ -144,9 +144,18 @@ def threaded_import_worker(app_instance, file_paths, q_ref, active_account_id_fo
             new_codes_to_add = potential_new_tx_codes - known_tx_types
             
             if new_codes_to_add:
+                # Obținem toate descrierile standard într-un dicționar pentru căutări rapide
+                cursor.execute("SELECT cod_swift, descriere_standard FROM swift_code_descriptions")
+                swift_descriptions = {row[0]: row[1] for row in cursor.fetchall()}
+
                 for new_code in new_codes_to_add:
-                    default_desc = f"Tip nou, cod: {new_code}"
-                    cursor.execute("INSERT INTO tipuri_tranzactii (cod, descriere_tip) VALUES (%s, %s)", (new_code, default_desc))
+                    # Căutăm descrierea standard în dicționar
+                    # Folosim .get() pentru a reveni la un text generic dacă codul nu este găsit
+                    description = swift_descriptions.get(new_code, f"Tip nou, cod: {new_code}")
+                    
+                    # Inserăm în tipuri_tranzactii cu descrierea corectă
+                    cursor.execute("INSERT INTO tipuri_tranzactii (cod, descriere_tip) VALUES (%s, %s)", (new_code, description))
+                
                 thread_conn_local.commit()
 
             transactions = re.findall(r"(:61:.*?)(?=(:61:|$))", content, re.DOTALL)

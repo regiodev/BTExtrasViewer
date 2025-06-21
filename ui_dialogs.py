@@ -10,7 +10,6 @@ import logging
 import re
 import auth_handler
 
-# --- METODĂ NOUĂ: RoleManagerDialog ---
 class RoleManagerDialog(simpledialog.Dialog):
     """Dialog pentru managementul complet al rolurilor și permisiunilor."""
     def __init__(self, parent, db_handler):
@@ -44,6 +43,8 @@ class RoleManagerDialog(simpledialog.Dialog):
                 ('configure_db', "Poate configura conexiunea la Baza de Date (Admin)"),
                 ('configure_smtp', "Poate configura setările SMTP personale"),
                 ('manage_transaction_types', "Poate modifica descrierile tipurilor de tranzacții"),
+                ('manage_swift_codes', "Poate edita descrierile standard SWIFT"),
+                ('manage_currencies', "Poate gestiona lista de valute"),
                 ('view_import_history', "Poate vedea istoricul de importuri"),
                 ('view_audit_log', "Poate vedea jurnalul de acțiuni")
             ]
@@ -166,8 +167,8 @@ class RoleManagerDialog(simpledialog.Dialog):
             if success: self._load_roles()
             else: messagebox.showerror("Eroare", message, parent=self)
 
-# --- CLASE EXISTENTE (majoritatea neschimbate) ---
 class AccountEditDialog(simpledialog.Dialog):
+
     def __init__(self, parent, db_handler, account_data=None, title=None):
         self.db_handler = db_handler
         self.account_data = account_data
@@ -175,7 +176,12 @@ class AccountEditDialog(simpledialog.Dialog):
         self.selected_color = account_data.get('culoare_cont', '#FFFFFF') if account_data and account_data.get('culoare_cont') else '#FFFFFF'
         if title is None:
             title = "Adaugă Cont Nou" if account_data is None else "Editează Cont Bancar"
+        self.available_currencies = db_handler.get_all_currencies()
+        if not self.available_currencies: # Fallback în caz de eroare
+            self.available_currencies = ["RON", "EUR", "USD"]
+        
         super().__init__(parent, title=title)
+
     def body(self, master):
         tk.Label(master, text="Nume Cont*:").grid(row=0, column=0, sticky=tk.W, pady=2, padx=5)
         self.name_entry = tk.Entry(master, width=40)
@@ -188,7 +194,9 @@ class AccountEditDialog(simpledialog.Dialog):
         self.bank_entry.grid(row=2, column=1, pady=2, padx=5)
         tk.Label(master, text="Valută:").grid(row=3, column=0, sticky=tk.W, pady=2, padx=5)
         self.currency_var = tk.StringVar(value="RON")
-        self.currency_combo = ttk.Combobox(master, textvariable=self.currency_var, values=["RON", "EUR", "USD", "GBP", "CHF"], state="readonly", width=38)
+        self.currency_combo = ttk.Combobox(master, textvariable=self.currency_var, 
+                                           values=self.available_currencies, # <<<< MODIFICARE AICI
+                                           state="readonly", width=38)
         self.currency_combo.grid(row=3, column=1, pady=2, padx=5)
         tk.Label(master, text="Observații:").grid(row=4, column=0, sticky=tk.NW, pady=2, padx=5)
         obs_text_frame = ttk.Frame(master)
@@ -935,3 +943,148 @@ class UserManagerDialog(simpledialog.Dialog):
                 self.load_users()
             else:
                 messagebox.showerror("Eroare", message, parent=self)
+
+class SwiftCodeManagerDialog(simpledialog.Dialog):
+    """Dialog pentru managementul descrierilor standard ale codurilor SWIFT."""
+    def __init__(self, parent, db_handler):
+        self.db_handler = db_handler
+        self.selected_code = None
+        super().__init__(parent, "Gestionare Descrieri Standard SWIFT")
+
+    def body(self, master):
+        self.tree_frame = ttk.Frame(master)
+        self.tree_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
+        cols = ("cod", "descriere")
+        self.codes_tree = ttk.Treeview(self.tree_frame, columns=cols, show="headings", selectmode="browse")
+        self.codes_tree.heading("cod", text="Cod SWIFT")
+        self.codes_tree.heading("descriere", text="Descriere Standard")
+        self.codes_tree.column("cod", width=100, anchor="w", stretch=False)
+        self.codes_tree.column("descriere", width=450, anchor="w")
+        self.codes_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar = ttk.Scrollbar(self.tree_frame, orient=tk.VERTICAL, command=self.codes_tree.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.codes_tree.configure(yscrollcommand=scrollbar.set)
+        self.codes_tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        self.codes_tree.bind("<Double-1>", lambda e: self._on_edit_description())
+
+        button_container = ttk.Frame(master)
+        button_container.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 10), padx=10)
+        self.edit_button = ttk.Button(button_container, text="Modifică Descriere", command=self._on_edit_description, state=tk.DISABLED)
+        self.edit_button.pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_container, text="Închide", command=self.ok).pack(side=tk.RIGHT, padx=5)
+        
+        self.load_codes()
+        return self.codes_tree
+
+    def buttonbox(self): pass
+
+    def load_codes(self):
+        for item in self.codes_tree.get_children(): self.codes_tree.delete(item)
+        if not self.db_handler.is_connected(): return
+        
+        # Creăm o metodă nouă în db_handler pentru a prelua aceste date
+        codes_data = self.db_handler.get_all_swift_descriptions()
+        if codes_data:
+            for code_info in codes_data:
+                values = (code_info['cod_swift'], code_info['descriere_standard'])
+                self.codes_tree.insert("", tk.END, iid=code_info['cod_swift'], values=values)
+        self._on_tree_select(None)
+
+    def _on_tree_select(self, event):
+        selected_items = self.codes_tree.selection()
+        if selected_items:
+            self.selected_code = selected_items[0]
+            self.edit_button.config(state=tk.NORMAL)
+        else:
+            self.selected_code = None
+            self.edit_button.config(state=tk.DISABLED)
+
+    def _on_edit_description(self):
+        if not self.selected_code: return
+        current_description = self.codes_tree.item(self.selected_code, 'values')[1]
+        new_description = simpledialog.askstring("Modifică Descriere", f"Introduceți noua descriere pentru codul '{self.selected_code}':", initialvalue=current_description, parent=self)
+        if new_description and new_description.strip():
+            # Creăm o metodă nouă în db_handler pentru update
+            if self.db_handler.update_swift_description(self.selected_code, new_description.strip()):
+                self.load_codes()
+            else:
+                messagebox.showerror("Eroare", "Nu s-a putut actualiza descrierea.", parent=self)
+
+class CurrencyManagerDialog(simpledialog.Dialog):
+    """Dialog pentru managementul valutelor disponibile în aplicație."""
+    def __init__(self, parent, db_handler):
+        self.db_handler = db_handler
+        self.selected_currency = None
+        super().__init__(parent, "Gestionare Valute")
+
+    def body(self, master):
+        list_frame = ttk.Frame(master)
+        list_frame.pack(pady=10, padx=10, fill=tk.BOTH, expand=True)
+        
+        self.currency_listbox = tk.Listbox(list_frame, exportselection=False, height=10)
+        self.currency_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.currency_listbox.bind("<<ListboxSelect>>", self._on_list_select)
+        
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.currency_listbox.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.currency_listbox.configure(yscrollcommand=scrollbar.set)
+        
+        button_container = ttk.Frame(master)
+        button_container.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
+        self.add_btn = ttk.Button(button_container, text="Adaugă Valută", command=self._add_currency)
+        self.add_btn.pack(side=tk.LEFT)
+        self.delete_btn = ttk.Button(button_container, text="Șterge Selectat", command=self._delete_currency, state=tk.DISABLED)
+        self.delete_btn.pack(side=tk.LEFT, padx=5)
+
+        self.load_currencies()
+        return self.currency_listbox
+        
+    def buttonbox(self):
+        box = ttk.Frame(self)
+        ttk.Button(box, text="Închide", width=15, command=self.ok).pack(pady=5)
+        box.pack()
+
+    def load_currencies(self):
+        self.currency_listbox.delete(0, tk.END)
+        all_currencies = self.db_handler.get_all_currencies()
+        for curr in all_currencies:
+            self.currency_listbox.insert(tk.END, curr)
+        self._on_list_select(None)
+
+    def _on_list_select(self, event):
+        selections = self.currency_listbox.curselection()
+        if selections:
+            self.selected_currency = self.currency_listbox.get(selections[0])
+            # Nu permitem ștergerea RON
+            if self.selected_currency == "RON":
+                self.delete_btn.config(state=tk.DISABLED)
+            else:
+                self.delete_btn.config(state=tk.NORMAL)
+        else:
+            self.selected_currency = None
+            self.delete_btn.config(state=tk.DISABLED)
+            
+    def _add_currency(self):
+        new_curr = simpledialog.askstring("Adaugă Valută", "Introduceți codul noii valute (ex: HUF, CAD):", parent=self)
+        if new_curr:
+            new_curr = new_curr.strip().upper()
+            if not (3 <= len(new_curr) <= 5 and new_curr.isalpha()):
+                messagebox.showerror("Format Invalid", "Codul valutei trebuie să conțină între 3 și 5 litere.", parent=self)
+                return
+            
+            success, message = self.db_handler.add_currency(new_curr)
+            if success:
+                self.load_currencies()
+            else:
+                messagebox.showerror("Eroare Adăugare", message, parent=self)
+
+    def _delete_currency(self):
+        if not self.selected_currency: return
+        
+        if messagebox.askyesno("Confirmare Ștergere", f"Sunteți sigur că doriți să ștergeți valuta '{self.selected_currency}'?", icon='warning', parent=self):
+            success, message = self.db_handler.delete_currency(self.selected_currency)
+            if success:
+                self.load_currencies()
+            else:
+                messagebox.showerror("Ștergere Eșuată", message, parent=self)

@@ -23,6 +23,18 @@ CREATE TABLE IF NOT EXISTS conturi_bancare (
     CONSTRAINT uq_nume_cont UNIQUE (nume_cont)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
+DB_STRUCTURE_VALUTE = """
+CREATE TABLE IF NOT EXISTS valute (
+    cod_valuta VARCHAR(5) PRIMARY KEY,
+    data_adaugare TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+"""
+DB_STRUCTURE_SWIFT_CODES = """
+CREATE TABLE IF NOT EXISTS swift_code_descriptions (
+    cod_swift VARCHAR(4) PRIMARY KEY,
+    descriere_standard TEXT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+"""
 DB_STRUCTURE_TIPURI_TRANZACTII_MARIADB = """
 CREATE TABLE IF NOT EXISTS tipuri_tranzactii (
     cod VARCHAR(4) PRIMARY KEY,
@@ -181,6 +193,95 @@ class DatabaseHandler:
         self.db_credentials = db_credentials
         self.app_master_ref = app_master_ref
 
+    def _seed_swift_codes_table(self):
+        """Populează tabela cu descrierile standard ale codurilor SWIFT dacă aceasta este goală."""
+        if not self.is_connected(): return
+        
+        try:
+            count = self.fetch_scalar("SELECT COUNT(*) FROM swift_code_descriptions")
+            if count == 0:
+                logging.info("Tabela swift_code_descriptions este goală. Se populează cu datele standard în limba română...")
+                
+                # Lista a fost actualizată cu descrierile în limba română din fișierul Excel.
+                swift_data = [
+                    ('BOE', 'Cambie (Bill of exchange)'),
+                    ('BRF', 'Taxa de brokeraj (Brokerage fee)'),
+                    ('CAR', 'Tranzactie cu cardul (Card transaction)'),
+                    ('CAS', 'Scrisori de numerar/Cecuri (Cash letters/Cheques)'),
+                    ('CDT', 'Transfer de credit (Credit transfer)'),
+                    ('CEC', 'Debit de la tert consumator (Consumer third party debit)'),
+                    ('CHG', 'Taxe si alte cheltuieli (Charges and other expenses)'),
+                    ('CHK', 'Cecuri (Cheques)'),
+                    ('CLR', 'Compensare scrisori de numerar/cecuri (Cash letters/Cheques clearing)'),
+                    ('CMI', 'Element de gestionare a numerarului; de ex. sweeping (Cash management item; e.g. sweeping)'),
+                    ('CMN', 'Element de gestionare a numerarului - Fara aviz (Cash management item - No-advise)'),
+                    ('CMP', 'Cereri de compensare (Compensation claims)'),
+                    ('CMS', 'Element de gestionare a numerarului - Aviz (Cash management item - Advise)'),
+                    ('CMT', 'Element de gestionare a numerarului - Transfer (Cash management item - Transfer)'),
+                    ('CMZ', 'Element de gestionare a numerarului - Aviz/Transfer (Cash management item - Advise/Transfer)'),
+                    ('COL', 'Colectari (Collections)'),
+                    ('COM', 'Comision (Commission)'),
+                    ('COU', 'Plati de cupoane (Coupon payments)'),
+                    ('CRE', 'Credit (Credit)'),
+                    ('DCR', 'Credit documentar (Documentary credit)'),
+                    ('DEB', 'Debit (Debit)'),
+                    ('DIV', 'Dividend (Dividend)'),
+                    ('EQV', 'Suma echivalenta (Equivalent amount)'),
+                    ('EXT', 'Extra (Extra)'),
+                    ('FEX', 'Schimb valutar (Foreign exchange)'),
+                    ('INT', 'Dobanda (Interest)'),
+                    ('LBX', 'Caseta de valori (Lockbox)'),
+                    ('LDP', 'Depozit de imprumut (Loan deposit)'),
+                    ('MAR', 'Plati in marja (Margin payments)'),
+                    ('MAT', 'Scadenta (Maturity)'),
+                    ('MSC', 'Diverse (Miscellaneous)'),
+                    ('NWI', 'Emisiune noua (New-issuance)'),
+                    ('ODC', 'Taxa de descoperire de cont (Overdraft charge)'),
+                    ('PCH', 'Cumparare/Vanzare (Purchase/Sale)'),
+                    ('POP', 'Punct de cumparare (Point of purchase)'),
+                    ('PRN', 'Plata principalului (Principal pay-down)'),
+                    ('REC', 'Incasare (Receipt)'),
+                    ('RED', 'Rascumparare (Redemption)'),
+                    ('REP', 'Operatiune Repo (Repo)'),
+                    ('RET', 'Returnare (Return)'),
+                    ('SAL', 'Salariu/Pensie (Salary/Pension)'),
+                    ('SEC', 'Valori mobiliare (Securities)'),
+                    ('STO', 'Ordin de plata programat (Standing order)'),
+                    ('STP', 'Imprumut de valori mobiliare (Securities lending)'),
+                    ('SUB', 'Subscriere (Subscription)'),
+                    ('SWP', 'Ordin de plata SWIFT (SWIFT payment order)'),
+                    ('TAX', 'Impozit (Tax)'),
+                    ('TCK', 'Cecuri de calatorie (Travellers cheques)'),
+                    ('TRF', 'Transfer (Transfer)'),
+                    ('TRN', 'Tranzactie (Transaction)'),
+                    ('UWC', 'Angajament de subscriere (Underwriting commitment)'),
+                    ('VDA', 'Ajustarea datei valorii (Value date adjustment)'),
+                    ('WAR', 'Mandat (Warrant)'),
+                    ('NCHG', 'Comisioane sau cheltuieli aplicate de entitati terte, nu de banca'),
+                    ('NCOL', 'Incasare de sume in numele clientului (de la o terta parte, NU de la banca)'),
+                    ('NFEX', 'Schimb valutar initiata prin sau de un tert, nu direct de banca'),
+                    ('NINT', 'Dobanda creditata in contul clientului'),
+                    ('NLDP', 'Imprumut primit sau un depozit de la un tert'),
+                    ('NMSC', 'Tranzactie diversa, neclasificata, in favoarea clientului'),
+                    ('NTRF', 'Transfer de tip Ordin de Plata (Network Transfer)'),
+                    ('NTDB', 'Transfer de debit in retea (Network Debit Transfer)'),
+                    ('NTCR', 'Transfer de credit in retea (Network Credit Transfer)'),
+                    ('NTCF', 'Transfer de numerar in avans in retea (Network Cash-in-advance Transfer)'),
+                    ('NTRY', 'Intrare (generica) (Entry (Generic))'),
+                    ('RTI', 'Element returnat (Return Item)')
+                ]
+
+                with self.conn.cursor() as cursor:
+                    sql_insert = "INSERT INTO swift_code_descriptions (cod_swift, descriere_standard) VALUES (%s, %s)"
+                    cursor.executemany(sql_insert, swift_data)
+                
+                self.conn.commit()
+                logging.info(f"{len(swift_data)} înregistrări SWIFT standard au fost inserate.")
+
+        except mysql.connector.Error as err:
+            logging.error(f"Eroare la popularea tabelei swift_code_descriptions: {err.msg}")
+            self.conn.rollback()
+
     # --- METODE EXISTENTE (majoritatea neschimbate) ---
     def connect(self):
         if not self.db_credentials:
@@ -215,7 +316,9 @@ class DatabaseHandler:
                 DB_STRUCTURE_UTILIZATORI, DB_STRUCTURE_ROLURI, DB_STRUCTURE_TRANZACTII_V2_MARIADB,
                 CREATE_TABLE_ISTORIC_IMPORTURI, DB_STRUCTURE_UTILIZATORI_ROLURI,
                 DB_STRUCTURE_ROLURI_PERMISIUNI, DB_STRUCTURE_UTILIZATORI_CONTURI,
-                DB_STRUCTURE_JURNAL_ACTIUNI
+                DB_STRUCTURE_JURNAL_ACTIUNI,
+                DB_STRUCTURE_SWIFT_CODES,
+                DB_STRUCTURE_VALUTE
             ]
         
         try:
@@ -225,7 +328,10 @@ class DatabaseHandler:
             self.conn.commit()
             logging.info("Toate tabelele au fost verificate/create cu succes.")
             self._seed_initial_data()
+            self._seed_swift_codes_table()
+            self._seed_valute_table()
             return True
+        
         except mysql.connector.Error as err:
             logging.error(f"Eroare la crearea schemei DB: {err.msg}")
             self.conn.rollback()
@@ -249,8 +355,11 @@ class DatabaseHandler:
                     permisiuni_operator = [
                         'import_files', 'export_data', 'view_reports', 'run_report_cashflow', 
                         'run_report_balance_evolution', 'run_report_transaction_analysis', 
-                        'view_import_history', 'configure_smtp' # Permisiune adăugată
+                        'view_import_history', 'configure_smtp'
                     ]
+
+                    cursor.execute("INSERT INTO roluri_permisiuni (id_rol, cheie_permisiune) VALUES (%s, %s)", (id_rol_admin, 'manage_swift_codes'))
+
                     for perm in permisiuni_operator:
                         cursor.execute("INSERT INTO roluri_permisiuni (id_rol, cheie_permisiune) VALUES (%s, %s)", (id_rol_operator, perm))
 
@@ -322,6 +431,63 @@ class DatabaseHandler:
             if self.app_master_ref:
                 messagebox.showerror("Eroare Execuție Query", f"Eroare SQL: {e.msg}", parent=self.app_master_ref)
             return False
+
+    def get_all_currencies(self):
+        """Returnează o listă cu toate codurile de valute din baza de date."""
+        if not self.is_connected(): return []
+        results = self.fetch_all_dict("SELECT cod_valuta FROM valute ORDER BY cod_valuta ASC")
+        return [r['cod_valuta'] for r in results]
+
+    def add_currency(self, cod_valuta):
+        """Adaugă o nouă valută în baza de date."""
+        if not self.is_connected(): return False, "Fără conexiune la baza de date."
+        try:
+            sql = "INSERT INTO valute (cod_valuta) VALUES (%s)"
+            if self.execute_commit(sql, (cod_valuta,)):
+                return True, "Valuta a fost adăugată."
+            else:
+                return False, "Eroare la adăugarea valutei."
+        except mysql.connector.Error as e:
+            if e.errno == errorcode.ER_DUP_ENTRY:
+                return False, "Această valută există deja."
+            return False, f"Eroare DB: {e.msg}"
+
+    def delete_currency(self, cod_valuta):
+        """Șterge o valută, doar dacă nu este folosită de niciun cont."""
+        if not self.is_connected(): return False, "Fără conexiune la baza de date."
+        
+        # Verificare critică: nu ștergem o valută dacă este în uz
+        usage_count = self.fetch_scalar("SELECT COUNT(*) FROM conturi_bancare WHERE valuta = %s", (cod_valuta,))
+        if usage_count > 0:
+            return False, f"Valuta '{cod_valuta}' nu poate fi ștearsă deoarece este folosită de {usage_count} cont(uri)."
+            
+        sql = "DELETE FROM valute WHERE cod_valuta = %s"
+        if self.execute_commit(sql, (cod_valuta,)):
+            return True, "Valuta a fost ștearsă."
+        else:
+            return False, "Eroare la ștergerea valutei."
+
+    def _seed_valute_table(self):
+        """Populează tabela `valute` cu o listă implicită dacă tabela este goală."""
+        if not self.is_connected(): return
+        
+        try:
+            count = self.fetch_scalar("SELECT COUNT(*) FROM valute")
+            if count == 0:
+                logging.info("Tabela valute este goală. Se populează cu datele standard...")
+                
+                valute_standard = [('RON',), ('EUR',), ('USD',), ('GBP',), ('CHF',)]
+
+                with self.conn.cursor() as cursor:
+                    sql_insert = "INSERT INTO valute (cod_valuta) VALUES (%s)"
+                    cursor.executemany(sql_insert, valute_standard)
+                
+                self.conn.commit()
+                logging.info(f"{len(valute_standard)} valute standard au fost inserate.")
+
+        except mysql.connector.Error as err:
+            logging.error(f"Eroare la popularea tabelei valute: {err.msg}")
+            self.conn.rollback()
 
     def get_all_accounts(self):
         if not self.is_connected(): return []
@@ -487,6 +653,17 @@ class DatabaseHandler:
             if cursor:
                 cursor.close()
 
+    def get_all_swift_descriptions(self):
+        """Returnează toate descrierile standard SWIFT din baza de date."""
+        if not self.is_connected(): return []
+        return self.fetch_all_dict("SELECT cod_swift, descriere_standard FROM swift_code_descriptions ORDER BY cod_swift ASC")
+
+    def update_swift_description(self, code, description):
+        """Actualizează descrierea standard pentru un cod SWIFT."""
+        if not self.is_connected(): return False
+        sql = "UPDATE swift_code_descriptions SET descriere_standard = %s WHERE cod_swift = %s"
+        return self.execute_commit(sql, (description, code))
+    
     def get_user_permissions(self, user_id):
         query = """
             SELECT DISTINCT rp.cheie_permisiune
