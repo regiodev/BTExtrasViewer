@@ -1,4 +1,5 @@
 # btextrasviewer_main.py
+
 import os
 import logging
 import configparser
@@ -7,26 +8,29 @@ from tkinter import filedialog, messagebox, ttk, simpledialog, scrolledtext
 from datetime import datetime, date
 import calendar
 from tkcalendar import DateEntry
-from ui_reports import CashFlowReportDialog, BalanceEvolutionReportDialog, TransactionAnalysisReportDialog
-from config_management import (
-    read_smtp_config_from_parser,
-    APP_DATA_DIR 
-)
 import re 
 from queue import Queue, Empty 
 import threading
 
-# Importurile din modulele noastre
-from app_constants import APP_NAME, APP_VERSION, APP_COPYRIGHT, DEFAULT_TREEVIEW_DISPLAY_COLUMNS, MONTH_MAP_FOR_NAV, REVERSE_MONTH_MAP_FOR_NAV
-import config_management
-from db_handler import DatabaseHandler, MariaDBConfigDialog # Corectat, db_handler este aici
-import file_processing 
-from file_processing import extract_iban_from_mt940, threaded_import_worker, threaded_export_worker
-import ui_utils
-from ui_dialogs import AccountManagerDialog, AccountEditDialog, TransactionTypeManagerDialog, SMTPConfigDialog, BalanceReportConfigDialog, LoginDialog, UserManagerDialog, RoleManagerDialog, SwiftCodeManagerDialog, CurrencyManagerDialog
+# --- BLOCUL DE IMPORTURI REVIZUIT ---
 
-# NOU: Importăm handler-ul de autentificare. Vom avea nevoie de el în pasul următor.
-import auth_handler
+# Importurile din pachetul comun (common/)
+from common.app_constants import APP_NAME, APP_VERSION, APP_COPYRIGHT, DEFAULT_TREEVIEW_DISPLAY_COLUMNS, MONTH_MAP_FOR_NAV, REVERSE_MONTH_MAP_FOR_NAV
+from common import config_management # <-- MODIFICARE CHEIE AICI
+from common.db_handler import DatabaseHandler, MariaDBConfigDialog
+from common import auth_handler
+
+# Importurile din pachetul local BTExtrasViewer (folosind importuri relative)
+from .ui_reports import CashFlowReportDialog, BalanceEvolutionReportDialog, TransactionAnalysisReportDialog
+from . import file_processing
+from .file_processing import extract_iban_from_mt940, threaded_import_worker, threaded_export_worker
+from . import ui_utils
+from .ui_dialogs import (
+    AccountManagerDialog, AccountEditDialog, TransactionTypeManagerDialog, 
+    SMTPConfigDialog, BalanceReportConfigDialog, LoginDialog, 
+    UserManagerDialog, RoleManagerDialog, SwiftCodeManagerDialog, CurrencyManagerDialog
+)
+# --- SFÂRȘIT BLOC DE IMPORTURI REVIZUIT ---
 
 class BTViewerApp:
     def __init__(self, master, user_data, db_handler, user_settings):
@@ -573,7 +577,7 @@ class BTViewerApp:
     def manage_roles(self):
         """Deschide dialogul de gestionare a rolurilor și permisiunilor."""
         # Aici vom folosi noua clasă RoleManagerDialog
-        from ui_dialogs import RoleManagerDialog # Import local pentru a evita circular dependencies
+        from .ui_dialogs import RoleManagerDialog # Am adăugat '.' pentru a face importul relativ
         dialog = RoleManagerDialog(self.master, self.db_handler)
 
     def create_menu(self):
@@ -2154,10 +2158,9 @@ class BTViewerApp:
             try: self.master.destroy()
             except tk.TclError: pass
 
-
 if __name__ == "__main__":
     # 1. Inițializare logging
-    log_file_path = os.path.join(APP_DATA_DIR, 'app_activity.log')
+    log_file_path = os.path.join(config_management.APP_DATA_DIR, 'app_activity.log')
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s',

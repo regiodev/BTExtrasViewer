@@ -6,8 +6,8 @@ import tkinter as tk
 from tkinter import simpledialog, messagebox
 import json
 
-# Importăm handler-ul de autentificare pentru a putea crea utilizatorul admin
-import auth_handler
+# Importăm auth_handler, care este acum un modul 'frate' în pachetul 'common'
+from . import auth_handler
 
 # --- CONSTANTE SQL PENTRU STRUCTURA BAZEI DE DATE (neschimbate) ---
 DB_STRUCTURE_CONTURI_BANCARE_MARIADB = """

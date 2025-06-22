@@ -2,7 +2,8 @@
 import os
 import logging
 import configparser
-from app_constants import APP_NAME, DEFAULT_TREEVIEW_DISPLAY_COLUMNS # Importăm din modulul nostru
+# Importăm constantele din același pachet 'common'
+from .app_constants import APP_NAME, DEFAULT_TREEVIEW_DISPLAY_COLUMNS 
 
 if os.name == 'nt':
     APP_DATA_DIR = os.path.join(os.getenv('LOCALAPPDATA'), APP_NAME)

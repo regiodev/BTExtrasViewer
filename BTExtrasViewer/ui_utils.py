@@ -1,7 +1,8 @@
 # ui_utils.py
 import tkinter as tk
 import logging
-from config_management import save_app_config
+# Modulul de configurare este importat din 'common'
+from common.config_management import save_app_config
 
 def handle_app_exit(app_instance, root_window):
     """

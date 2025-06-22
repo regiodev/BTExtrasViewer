@@ -24,8 +24,9 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from reportlab.lib.units import inch
 
-from email_handler import send_report_email
-from app_constants import APP_NAME, APP_VERSION
+from .email_handler import send_report_email
+# Modulul de constante este acum în 'common'
+from common.app_constants import APP_NAME, APP_VERSION
 
 # --- Constante pentru stilizarea graficului ---
 DIALOG_FONT_FAMILY = 'TkDefaultFont'

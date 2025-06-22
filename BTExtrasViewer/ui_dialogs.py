@@ -1,14 +1,15 @@
 # ui_dialogs.py
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, colorchooser
-from email_handler import test_smtp_connection
+from .email_handler import test_smtp_connection
 from datetime import date
 from tkcalendar import DateEntry
-import config_management
+# Modulele de bază sunt importate din 'common'
+from common import config_management
+from common import auth_handler
 import mysql.connector
 import logging
 import re
-import auth_handler
 
 class RoleManagerDialog(simpledialog.Dialog):
     """Dialog pentru managementul complet al rolurilor și permisiunilor."""
