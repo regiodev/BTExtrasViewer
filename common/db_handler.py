@@ -10,6 +10,7 @@ import json
 from . import auth_handler
 
 # --- CONSTANTE SQL PENTRU STRUCTURA BAZEI DE DATE (neschimbate) ---
+
 DB_STRUCTURE_CONTURI_BANCARE_MARIADB = """
 CREATE TABLE IF NOT EXISTS conturi_bancare (
     id_cont INT AUTO_INCREMENT PRIMARY KEY,
@@ -23,18 +24,21 @@ CREATE TABLE IF NOT EXISTS conturi_bancare (
     CONSTRAINT uq_nume_cont UNIQUE (nume_cont)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
+
 DB_STRUCTURE_VALUTE = """
 CREATE TABLE IF NOT EXISTS valute (
     cod_valuta VARCHAR(5) PRIMARY KEY,
     data_adaugare TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
+
 DB_STRUCTURE_SWIFT_CODES = """
 CREATE TABLE IF NOT EXISTS swift_code_descriptions (
     cod_swift VARCHAR(4) PRIMARY KEY,
     descriere_standard TEXT NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
+
 DB_STRUCTURE_TIPURI_TRANZACTII_MARIADB = """
 CREATE TABLE IF NOT EXISTS tipuri_tranzactii (
     cod VARCHAR(4) PRIMARY KEY,
@@ -42,6 +46,7 @@ CREATE TABLE IF NOT EXISTS tipuri_tranzactii (
     este_operational BOOLEAN DEFAULT TRUE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
+
 DB_STRUCTURE_TRANZACTII_V2_MARIADB = """
 CREATE TABLE IF NOT EXISTS tranzactii (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -66,6 +71,7 @@ CREATE TABLE IF NOT EXISTS tranzactii (
     CONSTRAINT fk_tranzactie_tip FOREIGN KEY (cod_tranzactie_fk) REFERENCES tipuri_tranzactii(cod) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
+
 CREATE_TABLE_ISTORIC_IMPORTURI = """
 CREATE TABLE IF NOT EXISTS istoric_importuri (
     id_import INT AUTO_INCREMENT PRIMARY KEY,
@@ -102,6 +108,7 @@ CREATE TABLE IF NOT EXISTS roluri (
     descriere TEXT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
+
 DB_STRUCTURE_UTILIZATORI_ROLURI = """
 CREATE TABLE IF NOT EXISTS utilizatori_roluri (
     id_utilizator INT,
@@ -111,6 +118,7 @@ CREATE TABLE IF NOT EXISTS utilizatori_roluri (
     FOREIGN KEY (id_rol) REFERENCES roluri(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
+
 DB_STRUCTURE_ROLURI_PERMISIUNI = """
 CREATE TABLE IF NOT EXISTS roluri_permisiuni (
     id_rol INT,
@@ -119,6 +127,7 @@ CREATE TABLE IF NOT EXISTS roluri_permisiuni (
     FOREIGN KEY (id_rol) REFERENCES roluri(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
+
 DB_STRUCTURE_UTILIZATORI_CONTURI = """
 CREATE TABLE IF NOT EXISTS utilizatori_conturi_permise (
     id_utilizator INT,
@@ -128,6 +137,7 @@ CREATE TABLE IF NOT EXISTS utilizatori_conturi_permise (
     FOREIGN KEY (id_cont) REFERENCES conturi_bancare(id_cont) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
+
 DB_STRUCTURE_JURNAL_ACTIUNI = """
 CREATE TABLE IF NOT EXISTS jurnal_actiuni (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -137,6 +147,40 @@ CREATE TABLE IF NOT EXISTS jurnal_actiuni (
     detalii TEXT,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (id_utilizator) REFERENCES utilizatori(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+"""
+
+# --- CONSTANTE SQL PENTRU STRUCTURA CHAT ---
+DB_STRUCTURE_CHAT_CONVERSATII = """
+CREATE TABLE IF NOT EXISTS chat_conversatii (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nume_conversatie VARCHAR(255),
+    data_creare TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    tip_conversatie ENUM('unu_la_unu', 'grup') NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+"""
+
+DB_STRUCTURE_CHAT_PARTICIPANTI = """
+CREATE TABLE IF NOT EXISTS chat_participanti (
+    id_conversatie_fk INT NOT NULL,
+    id_utilizator_fk INT NOT NULL,
+    data_alaturare TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id_conversatie_fk, id_utilizator_fk),
+    FOREIGN KEY (id_conversatie_fk) REFERENCES chat_conversatii(id) ON DELETE CASCADE,
+    FOREIGN KEY (id_utilizator_fk) REFERENCES utilizatori(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+"""
+
+DB_STRUCTURE_CHAT_MESAJE = """
+CREATE TABLE IF NOT EXISTS chat_mesaje (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id_conversatie_fk INT NOT NULL,
+    id_expeditor_fk INT NOT NULL,
+    continut_mesaj TEXT NOT NULL,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    stare ENUM('trimis', 'livrat', 'citit') NOT NULL DEFAULT 'trimis',
+    FOREIGN KEY (id_conversatie_fk) REFERENCES chat_conversatii(id) ON DELETE CASCADE,
+    FOREIGN KEY (id_expeditor_fk) REFERENCES utilizatori(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
 
@@ -318,7 +362,11 @@ class DatabaseHandler:
                 DB_STRUCTURE_ROLURI_PERMISIUNI, DB_STRUCTURE_UTILIZATORI_CONTURI,
                 DB_STRUCTURE_JURNAL_ACTIUNI,
                 DB_STRUCTURE_SWIFT_CODES,
-                DB_STRUCTURE_VALUTE
+                DB_STRUCTURE_VALUTE,
+                # Adăugăm noile tabele pentru chat la finalul listei
+                DB_STRUCTURE_CHAT_CONVERSATII,
+                DB_STRUCTURE_CHAT_PARTICIPANTI,
+                DB_STRUCTURE_CHAT_MESAJE
             ]
         
         try:
@@ -410,7 +458,8 @@ class DatabaseHandler:
     def fetch_scalar(self, query, params=None):
         if not self.is_connected(): return None
         try:
-            with self.conn.cursor() as cursor:
+            # Adăugăm buffered=True pentru a rezolva definitiv eroarea "Unread result"
+            with self.conn.cursor(buffered=True) as cursor:
                 cursor.execute(query, params or ())
                 result = cursor.fetchone()
             return result[0] if result and len(result) > 0 else None
@@ -533,8 +582,8 @@ class DatabaseHandler:
 
     # --- METODĂ MODIFICATĂ ---
     def get_user_by_username(self, username):
-        # Adăugăm 'tranzactie_acces' la interogare
-        query = "SELECT id, username, parola_hash, salt, activ, tranzactie_acces FROM utilizatori WHERE username = %s"
+        # Adăugăm 'nume_complet' și 'tranzactie_acces' la interogare
+        query = "SELECT id, username, nume_complet, parola_hash, salt, activ, tranzactie_acces FROM utilizatori WHERE username = %s"
         return self.fetch_one_dict(query, (username,))
 
     # --- METODĂ MODIFICATĂ ---

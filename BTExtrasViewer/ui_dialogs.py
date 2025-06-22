@@ -615,9 +615,12 @@ class LoginDialog(simpledialog.Dialog):
         permissions = self.db_handler.get_user_permissions(user_id)
         allowed_accounts = self.db_handler.get_allowed_accounts_for_user(user_id)
         self.result = {
-            'id': user_id, 'username': username, 'permissions': permissions, 
-            'allowed_accounts': allowed_accounts, 'has_all_permissions': 'all_permissions' in permissions,
-            # Adăugăm noua proprietate la datele utilizatorului
+            'id': user_id,
+            'username': username,
+            'nume_complet': user_db_data.get('nume_complet'), # <-- LINIE NOUĂ
+            'permissions': permissions, 
+            'allowed_accounts': allowed_accounts,
+            'has_all_permissions': 'all_permissions' in permissions,
             'tranzactie_acces': user_db_data.get('tranzactie_acces', 'toate')
         }
         self.db_handler.log_action(user_id, username, "Login reușit")
