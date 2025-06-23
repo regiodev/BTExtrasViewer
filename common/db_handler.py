@@ -455,6 +455,38 @@ class DatabaseHandler:
             logging.error(f"Eroare SQL la fetch_one_dict: {e.msg}")
             return None
 
+    def get_unread_message_counts(self, user_id):
+        """
+        Returnează un dicționar cu numărul de mesaje necitite per expeditor
+        pentru un anumit utilizator. Un mesaj este considerat necitit dacă starea NU este 'citit'.
+        """
+        if not self.is_connected(): return {}
+        
+        # Găsim toate conversațiile la care participă utilizatorul
+        conv_ids_raw = self.fetch_all_dict("SELECT id_conversatie_fk FROM chat_participanti WHERE id_utilizator_fk = %s", (user_id,))
+        if not conv_ids_raw:
+            return {}
+        
+        conv_ids = tuple(item['id_conversatie_fk'] for item in conv_ids_raw)
+        if not conv_ids:
+            return {}
+            
+        placeholders = ','.join(['%s'] * len(conv_ids))
+
+        # Numărăm mesajele care NU sunt 'citit', grupate după expeditor
+        sql = f"""
+            SELECT id_expeditor_fk, COUNT(*) as unread_count
+            FROM chat_mesaje
+            WHERE id_conversatie_fk IN ({placeholders})
+              AND id_expeditor_fk != %s
+              AND stare != 'citit'
+            GROUP BY id_expeditor_fk
+        """
+        params = conv_ids + (user_id,)
+        
+        unread_data = self.fetch_all_dict(sql, params)
+        return {item['id_expeditor_fk']: item['unread_count'] for item in unread_data}
+
     def fetch_scalar(self, query, params=None):
         if not self.is_connected(): return None
         try:

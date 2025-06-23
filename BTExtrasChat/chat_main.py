@@ -34,6 +34,10 @@ def main():
         if not database.connect():
             messagebox.showerror("Eroare Critică", "Nu s-a putut inițializa conexiunea cu baza de date.")
             return
+
+        # --- MODIFICARE CHEIE: Activăm autocommit PENTRU aplicația de chat ---
+        database.conn.autocommit = True
+        print("INFO: Conexiunea la DB pentru chat a fost setată pe autocommit=True.")
         
         # Asigură-te că tabelele de chat există
         database.check_and_setup_database_schema()
