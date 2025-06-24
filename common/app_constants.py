@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 
 APP_NAME = "BTExtrasViewer"
-APP_VERSION = "4.2.3"
+APP_VERSION = "4.3.0"
 
 # Locale setting
 try:

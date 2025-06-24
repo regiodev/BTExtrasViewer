@@ -16,24 +16,24 @@ class ChatWindow:
         self.db_creds = db_creds
 
         self.master.title("BTExtras Chat")
-        self.master.geometry("900x600")
-        self.master.minsize(600, 400)
+        self.master.geometry("500x600")
+        self.master.minsize(400, 400)
 
         self.active_conversation_id = None
         self.users_list = []
         self.unread_counts = {}
-        self.last_polled_message_id = 0 # Va fi setat de _load_initial_state
-
+        self.conversation_details = {} # <-- LINIA NOUĂ, ADĂUGATĂ AICI
+        
         self.message_queue = queue.Queue()
         self.is_running = True
 
         self._setup_ui()
         
         # Logica de pornire, în ordinea corectă
-        self._load_initial_state() # 1. Stabilim starea de la pornire
-        self._populate_user_list() # 2. Afișăm corect interfața
+        self._load_initial_state() 
+        self._populate_conversation_list()
         
-        # 3. Pornim thread-urile pentru viitor
+        # 3. Pornim thread-urile pentru funcționalitățile în timp real
         self.polling_thread = threading.Thread(target=self._poll_for_new_messages, daemon=True)
         self.polling_thread.start()
         self.master.after(100, self._process_message_queue)
@@ -41,102 +41,85 @@ class ChatWindow:
 
         # --- Creare Tooltip pentru Timestamp ---
         self.tooltip = tk.Toplevel(self.master)
-        self.tooltip.withdraw() # Îl ascundem initial
-        self.tooltip.overrideredirect(True) # Fără margini de fereastră
+        self.tooltip.withdraw()
+        self.tooltip.overrideredirect(True)
         self.tooltip_label = ttk.Label(self.tooltip, text="", background="#FFFFE0", relief="solid", borderwidth=1, padding=2)
         self.tooltip_label.pack()
 
-        self.line_to_message_map = {} # Hartă: 'linie.coloană' -> msg_data
+        self.line_to_message_map = {}
 
     def _schedule_user_list_refresh(self):
         """Reîmprospătează periodic lista de utilizatori pentru a actualiza statusul."""
         if self.is_running:
-            self._populate_user_list()
+            self._populate_conversation_list()
             self.master.after(20000, self._schedule_user_list_refresh) # Reîmprospătare la 20 secunde
 
-    def _fetch_and_process_new_messages(self, cursor, polling_conn, my_conv_ids):
-        """Metodă helper care caută mesaje noi ('trimis') și le marchează ca 'livrat'."""
-        if not my_conv_ids:
-            return
-
-        placeholders = ','.join(['%s'] * len(my_conv_ids))
-        sql_select = f"""
-            SELECT m.id, m.id_conversatie_fk, m.id_expeditor_fk, m.continut_mesaj, m.timestamp, m.stare,
-                   COALESCE(u.nume_complet, u.username) AS expeditor
-            FROM chat_mesaje m JOIN utilizatori u ON m.id_expeditor_fk = u.id
-            WHERE m.id_conversatie_fk IN ({placeholders})
-              AND m.id_expeditor_fk != %s
-              AND m.stare = 'trimis'
-        """
-        params = my_conv_ids + (self.current_user['id'],)
-        cursor.execute(sql_select, params)
-        new_messages = cursor.fetchall()
-
-        if new_messages:
-            message_ids_to_update = [msg['id'] for msg in new_messages]
-            
-            update_placeholders = ','.join(['%s'] * len(message_ids_to_update))
-            cursor.execute(
-                f"UPDATE chat_mesaje SET stare = 'livrat' WHERE id IN ({update_placeholders})",
-                tuple(message_ids_to_update)
-            )
-            polling_conn.commit()
-
-            for msg in new_messages:
-                self.message_queue.put(msg)
+    def _on_manage_groups(self):
+        """Deschide dialogul de administrare a grupurilor."""
+        dialog = GroupManagerDialog(self.master, self.db_handler, self.current_user['id'])
+        # După ce dialogul este închis, reîmprospătăm lista principală de conversații,
+        # deoarece un grup ar fi putut fi redenumit, creat sau șters.
+        self._populate_conversation_list()
 
     def _poll_for_new_messages(self):
-        """Rulează în fundal și caută DOAR mesaje noi, cu ID mai mare decât cel de la pornire."""
+        """Versiune finală: Rulează în fundal, caută mesaje noi și trimite heartbeat."""
         polling_conn = None
         try:
             polling_conn = mysql.connector.connect(**self.db_creds)
-            polling_conn.autocommit = True
             
             while self.is_running:
+                cursor = None
                 try:
-                    # Heartbeat
                     cursor = polling_conn.cursor(dictionary=True)
+
+                    # 1. Heartbeat
                     cursor.execute(
                         "UPDATE utilizatori SET last_seen = CURRENT_TIMESTAMP WHERE id = %s",
                         (self.current_user['id'],)
                     )
-                    
-                    # Căutăm DOAR mesaje cu ID mai mare, apărute în timpul sesiunii
-                    sql_select = """
-                        SELECT m.id, m.id_conversatie_fk, m.id_expeditor_fk, m.continut_mesaj, m.timestamp, m.stare,
-                               COALESCE(u.nume_complet, u.username) AS expeditor
-                        FROM chat_mesaje m JOIN utilizatori u ON m.id_expeditor_fk = u.id
-                        WHERE m.id > %s AND m.id_expeditor_fk != %s
-                    """
-                    cursor.execute(sql_select, (self.last_polled_message_id, self.current_user['id']))
-                    new_messages = cursor.fetchall()
+                    polling_conn.commit()
 
+                    # 2. Căutare mesaje noi
+                    sql_select_new = """
+                        SELECT
+                            m.id, m.id_conversatie_fk, m.id_expeditor_fk, m.continut_mesaj, m.timestamp, m.stare,
+                            COALESCE(u.nume_complet, u.username) AS expeditor
+                        FROM
+                            chat_mesaje m
+                        JOIN chat_participanti p ON m.id_conversatie_fk = p.id_conversatie_fk
+                        JOIN utilizatori u ON m.id_expeditor_fk = u.id
+                        WHERE
+                            p.id_utilizator_fk = %s
+                            AND m.id_expeditor_fk != %s
+                            AND m.stare = 'trimis'
+                    """
+                    cursor.execute(sql_select_new, (self.current_user['id'], self.current_user['id']))
+                    new_messages = cursor.fetchall()
+                    
                     if new_messages:
-                        # Actualizăm ultimul ID văzut cu cel mai recent mesaj
-                        self.last_polled_message_id = new_messages[-1]['id']
-                        
-                        # Nu mai este nevoie să schimbăm starea în 'livrat',
-                        # deoarece logica ID > last_id previne reprocesarea.
+                        ids_to_update = [msg['id'] for msg in new_messages]
+                        placeholders = ','.join(['%s'] * len(ids_to_update))
+                        cursor.execute(
+                            f"UPDATE chat_mesaje SET stare = 'livrat' WHERE id IN ({placeholders})",
+                            tuple(ids_to_update)
+                        )
+                        polling_conn.commit()
                         
                         for msg in new_messages:
-                            # Verificăm dacă mesajul este pentru una din conversațiile noastre
-                            # (necesar deoarece WHERE nu mai filtrează după conv_id)
-                             conv_ids_raw = self.db_handler.fetch_all_dict("SELECT id_conversatie_fk FROM chat_participanti WHERE id_utilizator_fk = %s", (self.current_user['id'],))
-                             my_conv_ids = [item['id_conversatie_fk'] for item in conv_ids_raw]
-                             if msg['id_conversatie_fk'] in my_conv_ids:
-                                self.message_queue.put(msg)
+                            self.message_queue.put(msg)
 
                 except mysql.connector.Error as db_err:
                     print(f"Eroare DB în bucla de polling: {db_err}.")
                     time.sleep(10)
                     if not (polling_conn and polling_conn.is_connected()):
                         polling_conn = mysql.connector.connect(**self.db_creds)
-                        polling_conn.autocommit = True
+                finally:
+                    if cursor:
+                        cursor.close()
                 
                 time.sleep(3)
-        
         except Exception as e:
-            print(f"EROARE CRITICĂ în thread-ul de polling, se va opri: {e}")
+            print(f"EROARE CRITICĂ în thread-ul de polling: {e}")
         finally:
             if polling_conn and polling_conn.is_connected():
                 polling_conn.close()
@@ -148,49 +131,52 @@ class ChatWindow:
             while not self.message_queue.empty():
                 msg = self.message_queue.get_nowait()
                 
-                # Verificăm dacă mesajul aparține conversației active
                 if msg['id_conversatie_fk'] == self.active_conversation_id:
                     self._display_message(msg)
                 else:
-                    # Mesajul este pentru altă conversație, deci este necitit
                     sender_id = msg['id_expeditor_fk']
-                    # Incrementăm contorul pentru expeditor
                     self.unread_counts[sender_id] = self.unread_counts.get(sender_id, 0) + 1
                     updated_unread_list = True
 
         except queue.Empty:
             pass
         finally:
-            # Dacă am actualizat vreun contor, reîmprospătăm lista de utilizatori
             if updated_unread_list:
-                self._populate_user_list()
+                self._populate_conversation_list()
             
             if self.is_running:
                 self.master.after(200, self._process_message_queue)
 
     def _display_message(self, msg_data):
-        """Afișează doar conținutul mesajului și populează harta pentru tooltip."""
+        """Afișează un singur mesaj, adăugând prefix cu numele expeditorului pentru grupurri."""
         self.message_display.config(state="normal")
         
         is_my_message = msg_data['id_expeditor_fk'] == self.current_user['id']
         tag = "sent" if is_my_message else "received"
         
+        # Obținem detaliile conversației active
+        active_conv_details = self.conversation_details.get(self.active_conversation_id)
+        
+        prefix = ""
+        # Adăugăm numele expeditorului DOAR dacă suntem într-un grup și NU este mesajul nostru
+        if active_conv_details and active_conv_details['tip_conversatie'] == 'grup' and not is_my_message:
+            # Folosim doar prenumele pentru a păstra interfața aerisită
+            sender_name = (msg_data['expeditor'] or "Utilizator").split(' ')[0]
+            prefix = f"{sender_name}:\n"
+        
         # Obținem indexul de start înainte de a insera textul
         start_index = self.message_display.index(tk.END)
         
-        # Inserăm doar conținutul mesajului
-        self.message_display.insert(tk.END, msg_data['continut_mesaj'], tag)
+        # Construim mesajul final și îl inserăm
+        formatted_message = f"{prefix}{msg_data['continut_mesaj']}"
+        self.message_display.insert(tk.END, formatted_message, tag)
         
-        # Adăugăm indicatorul de citire
         if is_my_message and msg_data['stare'] == 'citit':
             self.message_display.insert(tk.END, " ✓", "read_receipt")
         
-        self.message_display.insert(tk.END, "\n") # Adăugăm o linie nouă la final
+        self.message_display.insert(tk.END, "\n\n", "line_spacing") # Spațiu mai mare între mesaje
         
-        # Obținem indexul de final
         end_index = self.message_display.index(tk.END)
-
-        # Adăugăm intrări în hartă pentru fiecare linie pe care o ocupă mesajul
         start_line = int(start_index.split('.')[0])
         end_line = int(end_index.split('.')[0])
         for i in range(start_line, end_line + 1):
@@ -204,50 +190,60 @@ class ChatWindow:
         main_pane = ttk.PanedWindow(self.master, orient=tk.HORIZONTAL)
         main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # --- Panoul din Stânga: Lista de Utilizatori ---
-        users_frame = ttk.LabelFrame(main_pane, text="Utilizatori", width=250)
+        # --- Panoul din Stânga: Lista de Conversații ---
+        users_frame = ttk.LabelFrame(main_pane, text="Conversații", width=250)
         main_pane.add(users_frame, weight=1)
 
-        self.user_tree = ttk.Treeview(users_frame, columns=("username", "status"), show="headings", selectmode="browse")
-        self.user_tree.heading("username", text="Utilizator")
-        self.user_tree.heading("status", text="Status")
-        self.user_tree.column("username", width=150)
-        self.user_tree.column("status", width=50, anchor="center")
-        self.user_tree.pack(fill=tk.BOTH, expand=True)
-        self.user_tree.bind("<<TreeviewSelect>>", self._on_user_selected)
+        # Revenim la modul 'headings' pentru control total asupra coloanelor
+        self.user_tree = ttk.Treeview(users_frame, columns=("status_icon", "name"), show="headings", selectmode="browse")
 
-        # Configurăm stilurile pentru lista de utilizatori
+        # Configurăm coloanele
+        self.user_tree.column("#0", width=0, stretch=tk.NO) # Ascundem complet coloana arborescentă
+        self.user_tree.column("status_icon", anchor="center", width=30, stretch=tk.NO)
+        self.user_tree.column("name", anchor="w", width=180)
+
+        # Setăm antete goale pentru a fi invizibile
+        self.user_tree.heading("status_icon", text="")
+        self.user_tree.heading("name", text="")
+
+        self.user_tree.pack(fill=tk.BOTH, expand=True)
+        # Am redenumit metoda de callback pentru claritate
+        self.user_tree.bind("<<TreeviewSelect>>", self._on_conversation_selected) 
+
+        # Configurăm stilurile pentru lista de conversații
         self.user_tree.tag_configure("online", foreground="green")
-        self.user_tree.tag_configure("offline", foreground="gray")
+        self.user_tree.tag_configure("offline", foreground="red")
         self.user_tree.tag_configure("unread", font=("Segoe UI", 9, "bold"))
+        self.user_tree.tag_configure("group_chat", foreground="#0000AA")
+        
+        # Creăm un cadru pentru butoanele de acțiune
+        action_buttons_frame = ttk.Frame(users_frame)
+        action_buttons_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(5,0), padx=2)
+        action_buttons_frame.columnconfigure((0, 1), weight=1) # Permite butoanelor să se extindă
+
+        new_chat_button = ttk.Button(action_buttons_frame, text="Utilizatori", command=self._on_new_conversation)
+        new_chat_button.grid(row=0, column=0, sticky="ew", padx=(0, 2))
+        
+        manage_groups_button = ttk.Button(action_buttons_frame, text="Grupuri", command=self._on_manage_groups)
+        manage_groups_button.grid(row=0, column=1, sticky="ew", padx=(2, 0))
         
         # --- Panoul din Dreapta: Conversația Activă ---
         chat_frame = ttk.Frame(main_pane)
-        main_pane.add(chat_frame, weight=3)
+        main_pane.add(chat_frame, weight=10)
         chat_frame.rowconfigure(0, weight=1)
         chat_frame.columnconfigure(0, weight=1)
 
-        # Zona de afișare a mesajelor
         self.message_display = scrolledtext.ScrolledText(chat_frame, state="disabled", wrap=tk.WORD, font=("Segoe UI", 10))
         self.message_display.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
 
         self.message_display.bind("<Motion>", self._on_mouse_move_on_message)
         self.message_display.bind("<Leave>", self._hide_tooltip)
         
-        # --- Configurare tag-uri pentru fereastra de mesaje ---
         self.message_display.tag_configure("read_receipt", foreground="blue", font=("Segoe UI", 8))
+        self.message_display.tag_configure("sent", justify="right", foreground="#006400") # Verde închis pentru text
+        self.message_display.tag_configure("received", justify="left", foreground="#00008B") # Albastru închis pentru text
+        self.message_display.tag_configure("date_separator", justify="center", foreground="gray", font=("Segoe UI", 8, "italic"))
         
-        # Adăugam și tag-uri pentru aliniere si background color
-        self.message_display.tag_configure("sent", justify="right", background="#dcf8c6", wrap=tk.WORD)
-        self.message_display.tag_configure("received", justify="left", background="#f0f0f0", wrap=tk.WORD)
-        self.message_display.tag_configure(
-            "date_separator", 
-            justify="center", 
-            foreground="gray", 
-            font=("Segoe UI", 8, "italic")
-        )
-        
-        # Zona de introducere a mesajelor
         self.message_input = ttk.Entry(chat_frame, font=("Segoe UI", 10))
         self.message_input.grid(row=1, column=0, sticky="ew", padx=(5, 0), pady=5)
         
@@ -256,11 +252,9 @@ class ChatWindow:
         self.send_button.config(command=self._send_message)
         self.message_input.bind("<Return>", self._send_message)
 
-        # --- Bara de Stare (Status Bar) ---
         status_bar_frame = ttk.Frame(self.master, relief=tk.SUNKEN, padding=(5, 3))
         status_bar_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=0, pady=0)
 
-        # Eticheta pentru identificare utilizator
         display_name = self.current_user.get('nume_complet') or self.current_user['username']
         self.user_identity_label = ttk.Label(
             status_bar_frame,
@@ -318,70 +312,70 @@ class ChatWindow:
         except Exception as e:
             messagebox.showerror("Eroare Trimitere", str(e))
 
-    def _on_user_selected(self, event=None):
-        """Invocată la selecția unui utilizator. Găsește/creează conversația și încarcă istoricul."""
+    def _on_conversation_selected(self, event=None):
+        """Invocată la selecția unei conversații. Încarcă istoricul și resetează contoarele."""
         selection = self.user_tree.selection()
-        if not selection:
+        if not selection or not selection[0]:
             return
-        
-        partner_id = int(selection[0])
 
-        # Resetăm contorul de mesaje necitite pentru această conversație
-        if partner_id in self.unread_counts:
-            del self.unread_counts[partner_id]
-            self._populate_user_list() # Reîmprospătăm lista pentru a elimina contorul vizual
-
-        new_conversation_id = self._get_or_create_conversation(partner_id)
-        
-        if self.active_conversation_id != new_conversation_id:
-            self.active_conversation_id = new_conversation_id
-        
-        if self.active_conversation_id:
-            partner_username = self.user_tree.item(selection[0], "values")[0]
-            self.master.title(f"BTExtras Chat - Conversație cu {partner_username}")
+        selected_conv_id = int(selection[0])
+        if self.active_conversation_id == selected_conv_id:
+            return
             
-            # Acum, doar apelăm încărcarea istoricului.
-            # Logica de marcare ca 'citit' va fi în interiorul acestei metode.
-            self._load_conversation_history()
+        self.active_conversation_id = selected_conv_id
+
+        conv_details = self.conversation_details.get(selected_conv_id)
+        if not conv_details:
+            return
+
+        display_name = conv_details.get('display_name')
+        prefix = "Grup: " if conv_details.get('tip_conversatie') == 'grup' else ""
+        self.master.title(f"BTExtras Chat - {prefix}{display_name}")
+        
+        self._load_conversation_history()
 
     def _mark_messages_as_read_in_db(self, message_ids_to_update):
         """
-        O metodă complet izolată care deschide o conexiune nouă doar pentru a
-        marca o listă de ID-uri de mesaje ca fiind 'citit'.
+        Metodă care marchează o listă de ID-uri de mesaje ca fiind 'citit',
+        folosind conexiunea principală a aplicației.
         """
         if not message_ids_to_update:
             return
 
-        temp_conn = None
+        print(f"INFO: Se marchează ca 'citit' {len(message_ids_to_update)} mesaje.")
+        
         try:
-            temp_conn = mysql.connector.connect(**self.db_creds)
-            cursor = temp_conn.cursor()
+            # Folosim conexiunea deja existentă a handler-ului principal
+            cursor = self.db_handler.conn.cursor()
             
             placeholders = ','.join(['%s'] * len(message_ids_to_update))
             sql_update = f"UPDATE chat_mesaje SET stare = 'citit' WHERE id IN ({placeholders})"
             
             cursor.execute(sql_update, tuple(message_ids_to_update))
-            temp_conn.commit()
+            # Commit-ul nu este necesar, deoarece conexiunea principală este pe autocommit=True
+            
+            print(f"SUCCES: Comanda UPDATE a afectat {cursor.rowcount} rânduri.")
             cursor.close()
-
         except Exception as e:
-            print(f"EROARE la marcarea mesajelor ca citite (conexiune izolată): {e}")
-            if temp_conn and temp_conn.is_connected():
-                temp_conn.rollback()
-        finally:
-            if temp_conn and temp_conn.is_connected():
-                temp_conn.close()
+            print(f"EROARE la marcarea mesajelor ca citite: {e}")
 
     def _get_or_create_conversation(self, partner_id):
-        """Găsește o conversație 1-la-1 existentă sau creează una nouă."""
+        """
+        Găsește o conversație 1-la-1 existentă sau creează una nouă.
+        Folosește o interogare robustă pentru a preveni duplicatele.
+        """
         my_id = self.current_user['id']
         
-        # SQL pentru a găsi o conversație 1-la-1 între 2 useri
+        # --- Interogare SQL robustă pentru a găsi conversația 1-la-1 ---
         sql_find = """
-            SELECT p1.id_conversatie_fk FROM chat_participanti p1
-            JOIN chat_participanti p2 ON p1.id_conversatie_fk = p2.id_conversatie_fk
-            JOIN chat_conversatii c ON p1.id_conversatie_fk = c.id
-            WHERE p1.id_utilizator_fk = %s AND p2.id_utilizator_fk = %s AND c.tip_conversatie = 'unu_la_unu'
+            SELECT p.id_conversatie_fk
+            FROM chat_participanti p
+            JOIN chat_conversatii c ON p.id_conversatie_fk = c.id
+            WHERE c.tip_conversatie = 'unu_la_unu'
+              AND p.id_utilizator_fk IN (%s, %s)
+            GROUP BY p.id_conversatie_fk
+            HAVING COUNT(DISTINCT p.id_utilizator_fk) = 2
+            LIMIT 1;
         """
         conversation_id = self.db_handler.fetch_scalar(sql_find, (my_id, partner_id))
 
@@ -389,27 +383,20 @@ class ChatWindow:
             return conversation_id
         else:
             # Creare conversație nouă
-            cursor = None # Inițializăm cursorul
+            cursor = None
             try:
-                # Creăm un cursor standard, deoarece problema a fost rezolvată în db_handler
                 cursor = self.db_handler.conn.cursor()
-                
-                # 1. Creează conversația
                 cursor.execute("INSERT INTO chat_conversatii (tip_conversatie) VALUES ('unu_la_unu')")
                 new_conv_id = cursor.lastrowid
                 
-                # 2. Adaugă ambii participanți
                 participants = [(new_conv_id, my_id), (new_conv_id, partner_id)]
                 cursor.executemany("INSERT INTO chat_participanti (id_conversatie_fk, id_utilizator_fk) VALUES (%s, %s)", participants)
                 
                 return new_conv_id
             except Exception as e:
                 messagebox.showerror("Eroare Creare Conversație", str(e))
-                if self.db_handler.conn.is_connected():
-                    self.db_handler.conn.rollback()
                 return None
             finally:
-                # Ne asigurăm că închidem cursorul
                 if cursor:
                     cursor.close()
 
@@ -439,7 +426,11 @@ class ChatWindow:
         print(f"INFO: Stare inițială încărcată. Contoare: {self.unread_counts}. Polling-ul va porni de la ID > {self.last_polled_message_id}.")
 
     def _load_conversation_history(self):
-        """Încarcă istoricul, afișează mesajele și APELEAZĂ metoda izolată de marcare ca 'citit'."""
+        """
+        Încarcă istoricul, marchează mesajele ca 'citit' în DB, apoi reîncarcă
+        contoarele de necitite și reîmprospătează lista de conversații.
+        """
+        # ... (codul existent de la începutul metodei, până la if not messages:) ...
         self.message_display.config(state="normal")
         self.message_display.delete("1.0", tk.END)
         self.line_to_message_map.clear()
@@ -460,6 +451,9 @@ class ChatWindow:
         
         if not messages:
             self.message_display.config(state="disabled")
+            # Chiar dacă nu sunt mesaje, trebuie să reîmprospătăm contoarele
+            self.unread_counts = self.db_handler.get_unread_message_counts(self.current_user['id'])
+            self._populate_conversation_list()
             return
 
         ids_to_mark_as_read = [
@@ -470,6 +464,13 @@ class ChatWindow:
         if ids_to_mark_as_read:
             self._mark_messages_as_read_in_db(ids_to_mark_as_read)
         
+        # --- BLOC NOU ȘI CRUCIAL ---
+        # După ce am marcat mesajele ca 'citit' în DB, cerem din nou starea reală a contoarelor
+        self.unread_counts = self.db_handler.get_unread_message_counts(self.current_user['id'])
+        # Și reîmprospătăm complet lista de conversații
+        self._populate_conversation_list()
+        
+        # Afișăm mesajele din conversația curentă
         last_message_date = None
         for msg in messages:
             current_message_date = msg['timestamp'].date()
@@ -478,6 +479,7 @@ class ChatWindow:
                 self.message_display.insert(tk.END, f"\n{date_str}\n", "date_separator")
                 last_message_date = current_message_date
             
+            # Actualizăm starea locală pentru a afișa bifa corect imediat
             if msg['id'] in ids_to_mark_as_read:
                 msg['stare'] = 'citit'
             
@@ -485,56 +487,764 @@ class ChatWindow:
 
         self.message_display.config(state="disabled")
 
-    def _populate_user_list(self):
-        """Populează lista de utilizatori și determină statusul lor pe baza 'last_seen'."""
+    def _on_create_group(self):
+        """Deschide dialogul de creare a unui grup și salvează datele în DB."""
+        # Preluăm o listă proaspătă de utilizatori disponibili pentru a o pasa dialogului
+        available_users = self.db_handler.fetch_all_dict(
+            "SELECT id, username, nume_complet FROM utilizatori WHERE activ = TRUE AND id != %s ORDER BY nume_complet ASC",
+            (self.current_user['id'],)
+        )
+        if not available_users:
+            messagebox.showinfo("Informație", "Nu există alți utilizatori disponibili pentru a crea un grup.", parent=self.master)
+            return
+            
+        dialog = CreateGroupDialog(self.master, available_users)
+        
+        # dialog.result va fi populat doar dacă se apasă OK și validarea trece
+        if dialog.result:
+            group_name = dialog.result['participant_ids']
+            # Adăugăm și creatorul grupului la lista de participanți
+            participant_ids = dialog.result['participant_ids'] + [self.current_user['id']]
+            
+            # --- Operațiune tranzacțională în baza de date ---
+            cursor = None
+            try:
+                cursor = self.db_handler.conn.cursor()
+                
+                # 1. Inserăm conversația de tip 'grup'
+                cursor.execute(
+                    "INSERT INTO chat_conversatii (nume_conversatie, tip_conversatie) VALUES (%s, 'grup')",
+                    (dialog.result['group_name'],)
+                )
+                new_conversation_id = cursor.lastrowid
+                
+                # 2. Inserăm toți participanții
+                participants_data = [(new_conversation_id, user_id) for user_id in participant_ids]
+                cursor.executemany(
+                    "INSERT INTO chat_participanti (id_conversatie_fk, id_utilizator_fk) VALUES (%s, %s)",
+                    participants_data
+                )
+                
+                # Nu este nevoie de commit() dacă folosim autocommit=True
+                
+                messagebox.showinfo("Succes", f"Grupul '{dialog.result['group_name']}' a fost creat.", parent=self.master)
+                # Reîmprospătăm lista de conversații pentru a afișa noul grup
+                self._populate_conversation_list()
+                
+            except Exception as e:
+                messagebox.showerror("Eroare Bază de Date", f"Grupul nu a putut fi creat:\n{e}", parent=self.master)
+            finally:
+                if cursor:
+                    cursor.close()
+
+    def _populate_conversation_list(self):
+        """
+        Populează lista cu toate conversațiile și afișează statusul vizual
+        (simbol + culoare) pentru conversațiile 1-la-1.
+        """
         try:
+            my_id = self.current_user['id']
+            sql = """
+                (SELECT
+                    c.id AS conversation_id, 'unu_la_unu' as tip_conversatie,
+                    other_p.id_utilizator_fk AS partner_id, ou.last_seen,
+                    COALESCE(ou.nume_complet, ou.username) as display_name,
+                    (SELECT MAX(timestamp) FROM chat_mesaje cm WHERE cm.id_conversatie_fk = c.id) as last_message_time
+                FROM chat_conversatii c
+                JOIN chat_participanti my_p ON c.id = my_p.id_conversatie_fk AND my_p.id_utilizator_fk = %s
+                JOIN chat_participanti other_p ON c.id = other_p.id_conversatie_fk AND other_p.id_utilizator_fk != %s
+                LEFT JOIN utilizatori ou ON other_p.id_utilizator_fk = ou.id
+                WHERE c.tip_conversatie = 'unu_la_unu')
+                UNION
+                (SELECT c.id AS conversation_id, 'grup' as tip_conversatie,
+                    NULL AS partner_id, NULL AS last_seen,
+                    c.nume_conversatie AS display_name,
+                    (SELECT MAX(timestamp) FROM chat_mesaje cm WHERE cm.id_conversatie_fk = c.id) as last_message_time
+                FROM chat_conversatii c
+                JOIN chat_participanti my_p ON c.id = my_p.id_conversatie_fk AND my_p.id_utilizator_fk = %s
+                WHERE c.tip_conversatie = 'grup')
+                ORDER BY last_message_time DESC;
+            """
+            conversations = self.db_handler.fetch_all_dict(sql, (my_id, my_id, my_id))
+            
+            selected_item_id = self.user_tree.selection()[0] if self.user_tree.selection() else None
+            
+            self.conversation_details.clear()
+            self.user_tree.delete(*self.user_tree.get_children())
 
-            # Preluăm și 'last_seen'
-            self.users_list = self.db_handler.fetch_all_dict(
-                "SELECT id, username, nume_complet, last_seen FROM utilizatori WHERE activ = TRUE AND id != %s ORDER BY nume_complet ASC",
-                (self.current_user['id'],)
-            )
-
-            # Salvăm selecția curentă pentru a o restaura
-            selected_item = self.user_tree.selection()
-
-            # Ștergem intrările vechi
-            for item in self.user_tree.get_children():
-                self.user_tree.delete(item)
-
-            if self.users_list:
-                for user in self.users_list:
-                    display_name = user.get('nume_complet') or user['username']
+            if conversations:
+                for conv in conversations:
+                    self.conversation_details[conv['conversation_id']] = conv
                     
-                    # Verificăm dacă există mesaje necitite de la acest utilizator
-                    unread_count = self.unread_counts.get(user['id'], 0)
+                    display_name = conv['display_name'] or "Conversație"
+                    status_prefix = ""
+                    tags_to_apply = []
+
+                    status_symbol = ""
+                    # Stabilim simbolul și tag-urile de culoare
+                    if conv['tip_conversatie'] == 'unu_la_unu':
+                        is_online = conv['last_seen'] and (datetime.now() - conv['last_seen'] < timedelta(seconds=15))
+                        if is_online:
+                            status_symbol = "✓"
+                            tags_to_apply.append('online')
+                        else:
+                            status_symbol = "✗"
+                            tags_to_apply.append('offline')
+                    else: # Este grup
+                        status_symbol = "G" # Simbol pentru grup
+                        tags_to_apply.append('group_chat')
+
+                    # Adăugăm contorul la nume dacă e cazul
+                    unread_count = 0
+                    if conv['tip_conversatie'] == 'unu_la_unu' and conv.get('partner_id'):
+                        unread_count = self.unread_counts.get(conv['partner_id'], 0)
+                    
                     if unread_count > 0:
                         display_name = f"{display_name} ({unread_count})"
-
-                    # Determinăm statusul
-                    status = "Offline"
-                    if user['last_seen']:
-                        # Considerăm un utilizator online dacă a fost activ în ultimele 15 secunde
-                        if datetime.now() - user['last_seen'] < timedelta(seconds=15):
-                            status = "Online"
-                    
-                    # Adăugăm tag-urile pentru stilizare
-                    tags_to_apply = []
-                    tags_to_apply.append("online" if status == "Online" else "offline")
-                    if unread_count > 0:
                         tags_to_apply.append("unread")
 
-                    self.user_tree.insert("", "end", iid=user['id'], values=(display_name, status), tags=tuple(tags_to_apply))
+                    # Inserăm datele în cele două coloane definite: 'status_icon' și 'name'
+                    self.user_tree.insert(
+                        "", 
+                        "end", 
+                        iid=conv['conversation_id'], 
+                        values=(status_symbol, display_name), 
+                        tags=tuple(tags_to_apply)
+                    )
 
-            # Restaurăm selecția, dacă mai este validă
-            if selected_item and self.user_tree.exists(selected_item[0]):
-                self.user_tree.selection_set(selected_item[0])
+            if selected_item_id and self.user_tree.exists(selected_item_id):
+                self.user_tree.selection_set(selected_item_id)
 
         except Exception as e:
-            messagebox.showerror("Eroare", f"Nu s-a putut încărca lista de utilizatori: {e}")
+            messagebox.showerror("Eroare", f"Nu s-a putut încărca lista de conversații: {e}")
+
+    def _on_new_conversation(self):
+        """Deschide un dialog pentru a selecta un utilizator și a iniția o conversație 1-la-1."""
+        available_users = self.db_handler.fetch_all_dict(
+            "SELECT id, username, nume_complet FROM utilizatori WHERE activ = TRUE AND id != %s ORDER BY nume_complet ASC",
+            (self.current_user['id'],)
+        )
+        if not available_users:
+            messagebox.showinfo("Informație", "Nu există alți utilizatori disponibili.", parent=self.master)
+            return
+
+        dialog = NewChatDialog(self.master, available_users)
+        
+        if dialog.result:
+            partner_id = dialog.result
+            # Folosim metoda deja existentă pentru a găsi sau crea conversația
+            conv_id = self._get_or_create_conversation(partner_id)
+            if conv_id:
+                # Reîmprospătăm lista pentru a ne asigura că noua conversație apare
+                self._populate_conversation_list()
+                # Selectăm automat conversația nou creată/găsită
+                self.user_tree.selection_set(conv_id)
+                self.user_tree.focus(conv_id)
+                self.user_tree.see(conv_id)
 
     def on_closing(self):
         """Gestionează închiderea ferestrei și oprește thread-ul de polling."""
         print("Aplicația de chat se închide, se oprește polling-ul...")
         self.is_running = False
         self.master.destroy()
+
+class CreateGroupDialog(simpledialog.Dialog):
+    """Fereastră de dialog pentru crearea unei noi conversații de grup."""
+    def __init__(self, parent, all_users):
+        self.all_users = all_users
+        self.result = None
+        super().__init__(parent, "Creare Conversație de Grup Nouă")
+
+    def body(self, master):
+        ttk.Label(master, text="Numele Grupului:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.group_name_entry = ttk.Entry(master, width=40)
+        self.group_name_entry.grid(row=0, column=1, padx=5, pady=5)
+
+        ttk.Label(master, text="Selectați Participanții:").grid(row=1, column=0, columnspan=2, sticky="w", padx=5)
+        
+        list_frame = ttk.Frame(master)
+        list_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=5)
+        
+        self.user_listbox = tk.Listbox(list_frame, selectmode=tk.MULTIPLE, exportselection=False, height=10)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.user_listbox.yview)
+        self.user_listbox.configure(yscrollcommand=scrollbar.set)
+        
+        self.user_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Populăm lista cu utilizatori disponibili
+        for user in self.all_users:
+            display_name = user.get('nume_complet') or user['username']
+            # Stocăm ID-ul și numele pentru a le recupera ulterior
+            self.user_listbox.insert(tk.END, display_name)
+            self.user_listbox.user_data = self.all_users
+
+        return self.group_name_entry
+
+    def validate(self):
+        self.group_name = self.group_name_entry.get().strip()
+        self.selected_indices = self.user_listbox.curselection()
+
+        if not self.group_name:
+            messagebox.showwarning("Date Incomplete", "Numele grupului este obligatoriu.", parent=self)
+            return 0
+        
+        # Este necesar cel puțin un alt participant pe lângă creator
+        if not self.selected_indices:
+            messagebox.showwarning("Date Incomplete", "Selectați cel puțin un alt participant.", parent=self)
+            return 0
+            
+        return 1
+
+    def apply(self):
+        # Colectăm ID-urile utilizatorilor selectați
+        selected_user_ids = [self.user_listbox.user_data[i]['id'] for i in self.selected_indices]
+        
+        self.result = {
+            "group_name": self.group_name,
+            "participant_ids": selected_user_ids
+        }
+
+class NewChatDialog(simpledialog.Dialog):
+    """Fereastră de dialog pentru selectarea unui utilizator pentru o nouă conversație 1-la-1."""
+    def __init__(self, parent, available_users):
+        self.available_users = available_users
+        self.result = None
+        super().__init__(parent, "Începe o Conversație Nouă")
+
+    def body(self, master):
+        ttk.Label(master, text="Selectați un utilizator:").pack(padx=5, pady=5)
+        
+        self.listbox = tk.Listbox(master, height=10, width=50, exportselection=False)
+        self.listbox.pack(padx=5, pady=5)
+
+        for user in self.available_users:
+            display_name = user.get('nume_complet') or user.get('username')
+            self.listbox.insert(tk.END, display_name)
+        
+        return self.listbox
+
+    def validate(self):
+        selection = self.listbox.curselection()
+        if not selection:
+            messagebox.showwarning("Selecție Invalidă", "Vă rugăm selectați un utilizator.", parent=self)
+            return 0
+        return 1
+
+    def apply(self):
+        selected_index = self.listbox.curselection()[0]
+        self.result = self.available_users[selected_index]['id']
+
+class GroupManagerDialog(simpledialog.Dialog):
+    """Fereastră de dialog pentru administrarea conversațiilor de grup."""
+    def __init__(self, parent, db_handler, user_id):
+        self.db_handler = db_handler
+        self.current_user_id = user_id
+        self.selected_group_id = None
+        super().__init__(parent, "Administrare Grupuri")
+
+    def body(self, master):
+        self.master.geometry("700x500") # Setăm o dimensiune mai mare
+        main_pane = ttk.PanedWindow(master, orient=tk.HORIZONTAL)
+        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # --- Panoul din Stânga: Lista de Grupuri ---
+        groups_list_frame = ttk.LabelFrame(main_pane, text="Grupurile Mele", width=250)
+        main_pane.add(groups_list_frame, weight=1)
+        
+        self.groups_listbox = tk.Listbox(groups_list_frame, exportselection=False)
+        self.groups_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # self.groups_listbox.bind("<<ListboxSelect>>", self._on_group_select) # Vom activa în pasul următor
+
+        # --- Panoul din Dreapta: Detalii și Acțiuni Grup ---
+        details_frame = ttk.LabelFrame(main_pane, text="Detalii Grup Selectat")
+        main_pane.add(details_frame, weight=2)
+
+        # Numele grupului
+        name_frame = ttk.Frame(details_frame)
+        name_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        ttk.Label(name_frame, text="Nume:").pack(side=tk.LEFT)
+        self.group_name_var = tk.StringVar()
+        self.group_name_entry = ttk.Entry(name_frame, textvariable=self.group_name_var, state="disabled")
+        self.group_name_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.save_name_button = ttk.Button(name_frame, text="Salvează Nume", state="disabled")
+        self.save_name_button.pack(side=tk.LEFT)
+
+        # Lista de participanți
+        participants_frame = ttk.LabelFrame(details_frame, text="Participanți")
+        participants_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.participants_listbox = tk.Listbox(participants_frame, exportselection=False)
+        self.participants_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        # Butoane de acțiune pentru participanți
+        participant_actions_frame = ttk.Frame(details_frame)
+        participant_actions_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.add_participant_button = ttk.Button(participant_actions_frame, text="Adaugă Participant", state="disabled")
+        self.add_participant_button.pack(side=tk.LEFT)
+        self.remove_participant_button = ttk.Button(participant_actions_frame, text="Șterge Participant", state="disabled")
+        self.remove_participant_button.pack(side=tk.LEFT, padx=5)
+
+        # Butoane de acțiune pentru întregul grup
+        group_actions_frame = ttk.Frame(details_frame)
+        group_actions_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=10, pady=10)
+        self.delete_group_button = ttk.Button(group_actions_frame, text="Șterge Grupul", state="disabled")
+        self.delete_group_button.pack(side=tk.RIGHT)
+        
+        return self.groups_listbox
+
+    def buttonbox(self):
+        # Suprascriem pentru a avea butoanele noastre
+        box = ttk.Frame(self)
+        # Butonul de creare grup nou va fi aici
+        self.create_new_group_button = ttk.Button(box, text="Creează un Grup Nou...")
+        self.create_new_group_button.pack(side=tk.LEFT, padx=10, pady=10)
+        
+        ttk.Button(box, text="Închide", command=self.ok).pack(side=tk.RIGHT, padx=10, pady=10)
+        box.pack()
+
+class AddParticipantDialog(simpledialog.Dialog):
+    """Dialog pentru a selecta utilizatori noi de adăugat într-un grup."""
+    def __init__(self, parent, users_to_add):
+        self.users_to_add = users_to_add
+        self.result = None
+        super().__init__(parent, "Adaugă Participanți Noi")
+
+    def body(self, master):
+        self.title("Adaugă Participanți")
+        ttk.Label(master, text="Selectați utilizatorii pe care doriți să îi adăugați:").pack(padx=5, pady=5)
+        
+        list_frame = ttk.Frame(master)
+        list_frame.pack(padx=5, pady=5, fill=tk.BOTH, expand=True)
+        
+        self.listbox = tk.Listbox(list_frame, selectmode=tk.MULTIPLE, exportselection=False, height=10, width=40)
+        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        for user in self.users_to_add:
+            display_name = user.get('nume_complet') or user.get('username')
+            self.listbox.insert(tk.END, display_name)
+        
+        return self.listbox
+
+    def apply(self):
+        selected_indices = self.listbox.curselection()
+        if selected_indices:
+            self.result = [self.users_to_add[i]['id'] for i in selected_indices]
+
+# Acum, înlocuiți clasa GroupManagerDialog existentă cu această versiune completă
+class GroupManagerDialog(simpledialog.Dialog):
+    """Fereastră de dialog pentru administrarea conversațiilor de grup."""
+    def __init__(self, parent, db_handler, user_id):
+        self.db_handler = db_handler
+        self.current_user_id = user_id
+        self.selected_group_id = None
+        self.listbox_map = {}
+        self.participants_map = {}
+        super().__init__(parent, "Administrare Grupuri")
+
+    def body(self, master):
+        self.master.geometry("700x500")
+        main_pane = ttk.PanedWindow(master, orient=tk.HORIZONTAL)
+        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Panoul din Stânga
+        groups_list_frame = ttk.LabelFrame(main_pane, text="Grupurile Mele", width=250)
+        main_pane.add(groups_list_frame, weight=1)
+        self.groups_listbox = tk.Listbox(groups_list_frame, exportselection=False)
+        self.groups_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.groups_listbox.bind("<<ListboxSelect>>", self._on_group_select)
+
+        # Panoul din Dreapta
+        details_frame = ttk.LabelFrame(main_pane, text="Detalii Grup Selectat")
+        main_pane.add(details_frame, weight=2)
+
+        name_frame = ttk.Frame(details_frame)
+        name_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        ttk.Label(name_frame, text="Nume:").pack(side=tk.LEFT)
+        self.group_name_var = tk.StringVar()
+        self.group_name_entry = ttk.Entry(name_frame, textvariable=self.group_name_var, state="disabled")
+        self.group_name_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.save_name_button = ttk.Button(name_frame, text="Salvează Nume", state="disabled", command=self._save_group_name)
+        self.save_name_button.pack(side=tk.LEFT)
+
+        participants_frame = ttk.LabelFrame(details_frame, text="Participanți")
+        participants_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.participants_listbox = tk.Listbox(participants_frame, exportselection=False)
+        self.participants_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.participants_listbox.bind("<<ListboxSelect>>", self._on_participant_select)
+
+        participant_actions_frame = ttk.Frame(details_frame)
+        participant_actions_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.add_participant_button = ttk.Button(participant_actions_frame, text="Adaugă Participant", state="disabled", command=self._add_participant)
+        self.add_participant_button.pack(side=tk.LEFT)
+        self.remove_participant_button = ttk.Button(participant_actions_frame, text="Șterge Participant", state="disabled", command=self._remove_participant)
+        self.remove_participant_button.pack(side=tk.LEFT, padx=5)
+
+        group_actions_frame = ttk.Frame(details_frame)
+        group_actions_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=10, pady=10)
+        self.delete_group_button = ttk.Button(group_actions_frame, text="Șterge Grupul", state="disabled")
+        self.delete_group_button.pack(side=tk.RIGHT)
+        
+        self._populate_group_list()
+        return self.groups_listbox
+
+    def buttonbox(self):
+        box = ttk.Frame(self)
+        self.create_new_group_button = ttk.Button(box, text="Creează un Grup Nou...")
+        self.create_new_group_button.pack(side=tk.LEFT, padx=10, pady=10)
+        ttk.Button(box, text="Închide", command=self.ok).pack(side=tk.RIGHT, padx=10, pady=10)
+        box.pack()
+
+    def _populate_group_list(self):
+        """Populează lista de grupuri din stânga."""
+        current_selection = self.groups_listbox.curselection()
+        self.groups_listbox.delete(0, tk.END)
+        self.listbox_map.clear()
+        
+        my_groups = self.db_handler.get_groups_for_user(self.current_user_id)
+        for index, group in enumerate(my_groups):
+            self.groups_listbox.insert(index, group['nume_conversatie'])
+            self.listbox_map[index] = group['id']
+        
+        if current_selection:
+            self.groups_listbox.selection_set(current_selection[0])
+        
+        self._clear_details_panel()
+        self._on_group_select()
+
+    def _clear_details_panel(self):
+        """Golește panoul din dreapta și dezactivează butoanele."""
+        self.group_name_var.set("")
+        self.participants_listbox.delete(0, tk.END)
+        self.group_name_entry.config(state="disabled")
+        self.save_name_button.config(state="disabled")
+        self.add_participant_button.config(state="disabled")
+        self.remove_participant_button.config(state="disabled")
+        self.delete_group_button.config(state="disabled")
+        self.selected_group_id = None
+
+    def _on_group_select(self, event=None):
+        """Invocată la click pe un grup. Afișează detaliile în panoul din dreapta."""
+        selection_indices = self.groups_listbox.curselection()
+        if not selection_indices:
+            self._clear_details_panel()
+            return
+        
+        selected_index = selection_indices[0]
+        self.selected_group_id = self.listbox_map.get(selected_index)
+
+        if not self.selected_group_id: return
+
+        group_name = self.groups_listbox.get(selected_index)
+        self.group_name_var.set(group_name)
+        self.group_name_entry.config(state="normal")
+        self.save_name_button.config(state="normal")
+        self.add_participant_button.config(state="normal")
+        self.delete_group_button.config(state="normal")
+        self.remove_participant_button.config(state="disabled")
+
+        self.participants_listbox.delete(0, tk.END)
+        self.participants_map.clear()
+        participants = self.db_handler.get_group_participants(self.selected_group_id)
+        for index, p in enumerate(participants):
+            self.participants_listbox.insert(index, p['display_name'])
+            self.participants_map[index] = p['id']
+
+    def _on_participant_select(self, event=None):
+        """Activează butonul de ștergere la selecția unui participant."""
+        if self.participants_listbox.curselection():
+            self.remove_participant_button.config(state="normal")
+        else:
+            self.remove_participant_button.config(state="disabled")
+
+    def _save_group_name(self):
+        """Salvează noul nume pentru grupul selectat."""
+        if not self.selected_group_id: return
+        new_name = self.group_name_var.get().strip()
+        if not new_name:
+            messagebox.showwarning("Nume Invalid", "Numele grupului nu poate fi gol.", parent=self)
+            return
+
+        if self.db_handler.update_group_name(self.selected_group_id, new_name):
+            messagebox.showinfo("Succes", "Numele grupului a fost actualizat.", parent=self)
+            self._populate_group_list()
+        else:
+            messagebox.showerror("Eroare", "Numele grupului nu a putut fi salvat.", parent=self)
+            
+    def _add_participant(self):
+        """Adaugă participanți noi la grupul curent."""
+        if not self.selected_group_id: return
+
+        all_users = self.db_handler.fetch_all_dict("SELECT id, username, nume_complet FROM utilizatori WHERE activ = TRUE")
+        current_participant_ids = set(self.participants_map.values())
+        
+        users_to_add = [user for user in all_users if user['id'] not in current_participant_ids]
+        
+        if not users_to_add:
+            messagebox.showinfo("Informație", "Toți utilizatorii sunt deja în acest grup.", parent=self)
+            return
+
+        dialog = AddParticipantDialog(self, users_to_add)
+        if dialog.result:
+            for user_id in dialog.result:
+                self.db_handler.add_participant_to_group(self.selected_group_id, user_id)
+            # Reîmprospătăm panoul de detalii
+            self._on_group_select()
+
+    def _remove_participant(self):
+        """Șterge un participant selectat din grupul curent."""
+        selection = self.participants_listbox.curselection()
+        if not self.selected_group_id or not selection: return
+
+        if len(self.participants_map) <= 2:
+            messagebox.showwarning("Acțiune Nepermisă", "Un grup trebuie să aibă cel puțin 2 participanți.", parent=self)
+            return
+
+        selected_index = selection[0]
+        user_id_to_remove = self.participants_map.get(selected_index)
+        
+        if user_id_to_remove == self.current_user_id:
+            messagebox.showwarning("Acțiune Nepermisă", "Nu vă puteți șterge singur dintr-un grup.", parent=self)
+            return
+            
+        user_name = self.participants_listbox.get(selected_index)
+        if messagebox.askyesno("Confirmare", f"Sunteți sigur că doriți să ștergeți participantul '{user_name}' din grup?", parent=self):
+            if self.db_handler.remove_participant_from_group(self.selected_group_id, user_id_to_remove):
+                self._on_group_select()
+            else:
+                messagebox.showerror("Eroare", "Participantul nu a putut fi șters.", parent=self)
+
+class GroupManagerDialog(simpledialog.Dialog):
+    """Fereastră de dialog pentru administrarea conversațiilor de grup."""
+    def __init__(self, parent, db_handler, user_id):
+        self.db_handler = db_handler
+        self.current_user_id = user_id
+        self.selected_group_id = None
+        self.listbox_map = {}
+        self.participants_map = {}
+        super().__init__(parent, "Administrare Grupuri")
+
+    def body(self, master):
+        self.master.geometry("700x500")
+        main_pane = ttk.PanedWindow(master, orient=tk.HORIZONTAL)
+        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Panoul din Stânga
+        groups_list_frame = ttk.LabelFrame(main_pane, text="Grupurile Mele", width=250)
+        main_pane.add(groups_list_frame, weight=1)
+        self.groups_listbox = tk.Listbox(groups_list_frame, exportselection=False)
+        self.groups_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.groups_listbox.bind("<<ListboxSelect>>", self._on_group_select)
+
+        # Panoul din Dreapta
+        details_frame = ttk.LabelFrame(main_pane, text="Detalii Grup Selectat")
+        main_pane.add(details_frame, weight=2)
+
+        name_frame = ttk.Frame(details_frame)
+        name_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
+        ttk.Label(name_frame, text="Nume:").pack(side=tk.LEFT)
+        self.group_name_var = tk.StringVar()
+        self.group_name_entry = ttk.Entry(name_frame, textvariable=self.group_name_var, state="disabled")
+        self.group_name_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        self.save_name_button = ttk.Button(name_frame, text="Salvează Nume", state="disabled", command=self._save_group_name)
+        self.save_name_button.pack(side=tk.LEFT)
+
+        participants_frame = ttk.LabelFrame(details_frame, text="Participanți")
+        participants_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.participants_listbox = tk.Listbox(participants_frame, exportselection=False)
+        self.participants_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.participants_listbox.bind("<<ListboxSelect>>", self._on_participant_select)
+
+        participant_actions_frame = ttk.Frame(details_frame)
+        participant_actions_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.add_participant_button = ttk.Button(participant_actions_frame, text="Adaugă Participant", state="disabled", command=self._add_participant)
+        self.add_participant_button.pack(side=tk.LEFT)
+        self.remove_participant_button = ttk.Button(participant_actions_frame, text="Șterge Participant", state="disabled", command=self._remove_participant)
+        self.remove_participant_button.pack(side=tk.LEFT, padx=5)
+
+        group_actions_frame = ttk.Frame(details_frame)
+        group_actions_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=10, pady=10)
+        self.delete_group_button = ttk.Button(group_actions_frame, text="Șterge Grupul", state="disabled", command=self._delete_group) # Am adăugat command
+        self.delete_group_button.pack(side=tk.RIGHT)
+        
+        self._populate_group_list()
+        return self.groups_listbox
+
+    def buttonbox(self):
+        box = ttk.Frame(self)
+        self.create_new_group_button = ttk.Button(box, text="Creează un Grup Nou...", command=self._create_new_group) # Am adăugat command
+        self.create_new_group_button.pack(side=tk.LEFT, padx=10, pady=10)
+        ttk.Button(box, text="Închide", command=self.ok).pack(side=tk.RIGHT, padx=10, pady=10)
+        box.pack()
+
+    # ... metodele _populate_group_list, _clear_details_panel, _on_group_select, etc. rămân la fel ca în pasul anterior ...
+    # Le includem aici pentru a avea o clasă completă și a evita erorile.
+
+    def _populate_group_list(self):
+        current_selection_indices = self.groups_listbox.curselection()
+        
+        self.groups_listbox.delete(0, tk.END)
+        self.listbox_map.clear()
+        
+        my_groups = self.db_handler.get_groups_for_user(self.current_user_id)
+        for index, group in enumerate(my_groups):
+            self.groups_listbox.insert(index, group['nume_conversatie'])
+            self.listbox_map[index] = group['id']
+        
+        # Restaurăm selecția dacă mai este validă
+        if current_selection_indices:
+            try: self.groups_listbox.selection_set(current_selection_indices[0])
+            except tk.TclError: pass
+        
+        self._on_group_select()
+
+    def _clear_details_panel(self):
+        self.group_name_var.set("")
+        self.participants_listbox.delete(0, tk.END)
+        self.group_name_entry.config(state="disabled")
+        self.save_name_button.config(state="disabled")
+        self.add_participant_button.config(state="disabled")
+        self.remove_participant_button.config(state="disabled")
+        self.delete_group_button.config(state="disabled")
+        self.selected_group_id = None
+
+    def _on_group_select(self, event=None):
+        selection_indices = self.groups_listbox.curselection()
+        if not selection_indices:
+            self._clear_details_panel()
+            return
+        
+        selected_index = selection_indices[0]
+        self.selected_group_id = self.listbox_map.get(selected_index)
+        if not self.selected_group_id: return
+
+        group_name = self.groups_listbox.get(selected_index)
+        self.group_name_var.set(group_name)
+        self.group_name_entry.config(state="normal")
+        self.save_name_button.config(state="normal")
+        self.add_participant_button.config(state="normal")
+        self.delete_group_button.config(state="normal")
+        self.remove_participant_button.config(state="disabled")
+
+        self.participants_listbox.delete(0, tk.END)
+        self.participants_map.clear()
+        participants = self.db_handler.get_group_participants(self.selected_group_id)
+        for index, p in enumerate(participants):
+            self.participants_listbox.insert(index, p['display_name'])
+            self.participants_map[index] = p['id']
+
+    def _on_participant_select(self, event=None):
+        if not self.participants_listbox.curselection():
+            self.remove_participant_button.config(state="disabled")
+            return
+        
+        selected_index = self.participants_listbox.curselection()[0]
+        user_id_to_remove = self.participants_map.get(selected_index)
+
+        if user_id_to_remove == self.current_user_id:
+            self.remove_participant_button.config(state="disabled")
+        else:
+            self.remove_participant_button.config(state="normal")
+
+    def _save_group_name(self):
+        if not self.selected_group_id: return
+        new_name = self.group_name_var.get().strip()
+        if not new_name:
+            messagebox.showwarning("Nume Invalid", "Numele grupului nu poate fi gol.", parent=self)
+            return
+
+        if self.db_handler.update_group_name(self.selected_group_id, new_name):
+            messagebox.showinfo("Succes", "Numele grupului a fost actualizat.", parent=self)
+            self._populate_group_list()
+        else:
+            messagebox.showerror("Eroare", "Numele grupului nu a putut fi salvat.", parent=self)
+            
+    def _add_participant(self):
+        if not self.selected_group_id: return
+        all_users = self.db_handler.fetch_all_dict("SELECT id, username, nume_complet FROM utilizatori WHERE activ = TRUE")
+        current_participant_ids = set(self.participants_map.values())
+        users_to_add = [user for user in all_users if user['id'] not in current_participant_ids]
+        
+        if not users_to_add:
+            messagebox.showinfo("Informație", "Toți utilizatorii sunt deja în acest grup.", parent=self)
+            return
+
+        dialog = AddParticipantDialog(self, users_to_add)
+        if dialog.result:
+            for user_id in dialog.result:
+                self.db_handler.add_participant_to_group(self.selected_group_id, user_id)
+            self._on_group_select()
+
+    def _remove_participant(self):
+        selection = self.participants_listbox.curselection()
+        if not self.selected_group_id or not selection: return
+
+        if len(self.participants_map) <= 2:
+            messagebox.showwarning("Acțiune Nepermisă", "Un grup trebuie să aibă cel puțin 2 participanți.", parent=self)
+            return
+
+        selected_index = selection[0]
+        user_id_to_remove = self.participants_map.get(selected_index)
+        if user_id_to_remove == self.current_user_id:
+            messagebox.showwarning("Acțiune Nepermisă", "Nu vă puteți șterge singur dintr-un grup.", parent=self)
+            return
+            
+        user_name = self.participants_listbox.get(selected_index)
+        if messagebox.askyesno("Confirmare", f"Sunteți sigur că doriți să ștergeți participantul '{user_name}' din grup?", parent=self):
+            if self.db_handler.remove_participant_from_group(self.selected_group_id, user_id_to_remove):
+                self._on_group_select()
+            else:
+                messagebox.showerror("Eroare", "Participantul nu a putut fi șters.", parent=self)
+
+    # --- METODE NOI PENTRU ULTIMELE BUTOANE ---
+    def _delete_group(self):
+        """Șterge grupul selectat curent."""
+        if not self.selected_group_id: return
+
+        group_name = self.group_name_var.get()
+        if messagebox.askyesno("Confirmare Ștergere", f"Sunteți absolut sigur că doriți să ștergeți PERMANENT grupul '{group_name}'?\n\nToate mesajele din acest grup vor fi pierdute.", icon='warning', parent=self):
+            if self.db_handler.delete_group(self.selected_group_id):
+                messagebox.showinfo("Succes", "Grupul a fost șters.", parent=self)
+                self._populate_group_list()
+            else:
+                messagebox.showerror("Eroare", "Grupul nu a putut fi șters.", parent=self)
+
+    def _create_new_group(self):
+        """Deschide dialogul de creare a unui grup nou."""
+        # Refolosim logica din vechea metodă _on_create_group
+        all_users = self.db_handler.fetch_all_dict(
+            "SELECT id, username, nume_complet FROM utilizatori WHERE activ = TRUE AND id != %s",
+            (self.current_user_id,)
+        )
+        dialog = CreateGroupDialog(self, all_users)
+        
+        if dialog.result:
+            participant_ids = dialog.result['participant_ids'] + [self.current_user_id]
+            group_name = dialog.result['group_name']
+            
+            cursor = None
+            try:
+                cursor = self.db_handler.conn.cursor()
+                cursor.execute(
+                    "INSERT INTO chat_conversatii (nume_conversatie, tip_conversatie) VALUES (%s, 'grup')",
+                    (group_name,)
+                )
+                new_conv_id = cursor.lastrowid
+                
+                participants_data = [(new_conv_id, user_id) for user_id in participant_ids]
+                cursor.executemany(
+                    "INSERT INTO chat_participanti (id_conversatie_fk, id_utilizator_fk) VALUES (%s, %s)",
+                    participants_data
+                )
+                
+                messagebox.showinfo("Succes", f"Grupul '{group_name}' a fost creat.", parent=self)
+                self._populate_group_list()
+                
+            except Exception as e:
+                messagebox.showerror("Eroare Bază de Date", f"Grupul nu a putut fi creat:\n{e}", parent=self)
+            finally:
+                if cursor:
+                    cursor.close()

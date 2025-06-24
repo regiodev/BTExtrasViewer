@@ -487,6 +487,60 @@ class DatabaseHandler:
         unread_data = self.fetch_all_dict(sql, params)
         return {item['id_expeditor_fk']: item['unread_count'] for item in unread_data}
 
+    # --- METODE NOI PENTRU ADMINISTRARE GRUPURI CHAT ---
+
+    def get_groups_for_user(self, user_id):
+        """Returnează toate grupurile la care un utilizator este participant."""
+        if not self.is_connected(): return []
+        sql = """
+            SELECT c.id, c.nume_conversatie
+            FROM chat_conversatii c
+            JOIN chat_participanti p ON c.id = p.id_conversatie_fk
+            WHERE p.id_utilizator_fk = %s AND c.tip_conversatie = 'grup'
+            ORDER BY c.nume_conversatie ASC;
+        """
+        return self.fetch_all_dict(sql, (user_id,))
+
+    def get_group_participants(self, conversation_id):
+        """Returnează toți participanții unui anumit grup."""
+        if not self.is_connected(): return []
+        sql = """
+            SELECT u.id, COALESCE(u.nume_complet, u.username) as display_name
+            FROM utilizatori u
+            JOIN chat_participanti p ON u.id = p.id_utilizator_fk
+            WHERE p.id_conversatie_fk = %s
+            ORDER BY display_name ASC;
+        """
+        return self.fetch_all_dict(sql, (conversation_id,))
+
+    def update_group_name(self, conversation_id, new_name):
+        """Actualizează numele unui grup."""
+        return self.execute_commit(
+            "UPDATE chat_conversatii SET nume_conversatie = %s WHERE id = %s",
+            (new_name, conversation_id)
+        )
+
+    def add_participant_to_group(self, conversation_id, user_id):
+        """Adaugă un utilizator nou într-un grup."""
+        return self.execute_commit(
+            "INSERT IGNORE INTO chat_participanti (id_conversatie_fk, id_utilizator_fk) VALUES (%s, %s)",
+            (conversation_id, user_id)
+        )
+
+    def remove_participant_from_group(self, conversation_id, user_id):
+        """Șterge un utilizator dintr-un grup."""
+        return self.execute_commit(
+            "DELETE FROM chat_participanti WHERE id_conversatie_fk = %s AND id_utilizator_fk = %s",
+            (conversation_id, user_id)
+        )
+
+    def delete_group(self, conversation_id):
+        """Șterge o întreagă conversație de grup."""
+        return self.execute_commit(
+            "DELETE FROM chat_conversatii WHERE id = %s AND tip_conversatie = 'grup'",
+            (conversation_id,)
+        )
+
     def fetch_scalar(self, query, params=None):
         if not self.is_connected(): return None
         try:

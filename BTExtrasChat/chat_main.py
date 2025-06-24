@@ -4,6 +4,7 @@ import os
 import tkinter as tk
 from tkinter import messagebox
 import sys
+import logging
 
 # Adăugăm directorul rădăcină în calea Python pentru a găsi pachetul 'common'
 # Acest lucru este necesar pentru a rula scriptul direct în timpul dezvoltării
