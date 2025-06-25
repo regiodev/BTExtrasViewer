@@ -58,7 +58,7 @@ def main():
         root = tk.Tk()
         # Pasăm și datele de conectare la DB (db_credentials)
         app = ChatWindow(root, database, user_data, db_credentials)
-        root.protocol("WM_DELETE_WINDOW", app.on_closing)
+        root.protocol("WM_DELETE_WINDOW", app._hide_to_tray)
         root.mainloop()
 
     except Exception as e:

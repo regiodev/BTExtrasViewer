@@ -7,6 +7,9 @@ import queue
 import time
 from datetime import datetime, timedelta
 import mysql.connector
+from PIL import Image
+import pystray
+import os
 
 class ChatWindow:
     def __init__(self, master, db_handler, user_data, db_creds):
@@ -26,14 +29,13 @@ class ChatWindow:
         
         self.message_queue = queue.Queue()
         self.is_running = True
+        self.tray_icon = None # Inițializăm ca None
 
         self._setup_ui()
-        
-        # Logica de pornire, în ordinea corectă
-        self._load_initial_state() 
+        self._load_initial_state()
         self._populate_conversation_list()
         
-        # 3. Pornim thread-urile pentru funcționalitățile în timp real
+        # Pornim thread-urile
         self.polling_thread = threading.Thread(target=self._poll_for_new_messages, daemon=True)
         self.polling_thread.start()
         self.master.after(100, self._process_message_queue)
@@ -47,6 +49,58 @@ class ChatWindow:
         self.tooltip_label.pack()
 
         self.line_to_message_map = {}
+
+        self._setup_tray_icon()
+
+    def _setup_tray_icon(self):
+        """Creează și returnează un obiect pystray.Icon nou."""
+        image_path = os.path.join("assets", "BT_logo.ico")
+        try:
+            image = Image.open(image_path)
+            menu = (
+                pystray.MenuItem('Deschide Chat', self._show_from_tray, default=True),
+                pystray.MenuItem('Ieșire Definitivă', self._quit_application)
+            )
+            # Creăm și returnăm un obiect nou de fiecare dată
+            return pystray.Icon("BTExtrasChat", image, "BTExtras Chat", menu)
+        except FileNotFoundError:
+            print(f"EROARE: Fișierul icon nu a fost găsit la calea: {image_path}")
+            return None
+
+    def _run_tray_icon(self):
+        """Rulează iconița în tray. Acesta este un apel blocant."""
+        # Creăm un obiect iconiță nou de fiecare dată
+        icon = self._setup_tray_icon()
+        if icon:
+            self.tray_icon = icon
+            self.tray_icon.run()
+
+    def _hide_to_tray(self):
+        """Ascunde fereastra principală și pornește iconița în system tray."""
+        self.master.withdraw()
+        # Pornim rularea iconiței într-un thread nou pentru a nu bloca programul
+        threading.Thread(target=self._run_tray_icon, daemon=True).start()
+
+    def _show_from_tray(self):
+        """Oprește iconița și programează restaurarea ferestrei pe thread-ul principal."""
+        if self.tray_icon:
+            self.tray_icon.stop()
+        # Programăm execuția pe thread-ul principal, în siguranță
+        self.master.after(0, self.master.deiconify)
+        self.master.after(100, self.master.focus_force)
+
+    def _quit_application(self):
+        """Oprește toate procesele și programează închiderea aplicației."""
+        if self.tray_icon:
+            self.tray_icon.stop()
+        self.is_running = False # Oprește buclele de polling și refresh
+        # Programăm distrugerea ferestrei pe thread-ul principal
+        self.master.after(100, self.master.destroy)
+
+    def on_closing(self):
+        """Metodă goală, suprascrisă de _quit_application pentru închiderea reală."""
+        # Logica de închidere este acum în _quit_application
+        pass
 
     def _schedule_user_list_refresh(self):
         """Reîmprospătează periodic lista de utilizatori pentru a actualiza statusul."""
@@ -642,11 +696,11 @@ class ChatWindow:
                 self.user_tree.focus(conv_id)
                 self.user_tree.see(conv_id)
 
-    def on_closing(self):
-        """Gestionează închiderea ferestrei și oprește thread-ul de polling."""
-        print("Aplicația de chat se închide, se oprește polling-ul...")
-        self.is_running = False
-        self.master.destroy()
+    def _hide_to_tray(self):
+        """Ascunde fereastra principală și pornește iconița în system tray."""
+        self.master.withdraw()
+        # Pornim rularea iconiței într-un thread nou pentru a nu bloca programul
+        threading.Thread(target=self._run_tray_icon, daemon=True).start()
 
 class CreateGroupDialog(simpledialog.Dialog):
     """Fereastră de dialog pentru crearea unei noi conversații de grup."""
