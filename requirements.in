@@ -1,0 +1,20 @@
+#
+# Fișierul sursă pentru cerințele de top-level ale proiectului BTExtras.
+# Folosiți 'pip-compile requirements.in' pentru a genera requirements.txt.
+#
+
+# === Dependințe de Producție ===
+mysql-connector-python
+SQLAlchemy
+pandas
+numpy
+tkcalendar
+Pillow
+pystray
+keyboard
+matplotlib
+openpyxl
+reportlab
+
+# === Dependințe de Dezvoltare și Testare ===
+pytest

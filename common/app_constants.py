@@ -27,18 +27,20 @@ for i in range(1, 13):
         month_name = datetime(2000, i, 1).strftime('%B').capitalize()
         MONTH_MAP_FOR_NAV[month_name] = i
     except ValueError: # Fallback for some systems
-        # For Python versions where calendar.month_name might not be localized correctly by setlocale
-        # or if strftime %B is not behaving as expected.
-        # This provides a basic English fallback if Romanian names fail.
-        # A more robust solution might involve a predefined dictionary for Romanian month names.
         import calendar
         month_name_en = calendar.month_name[i]
-        if month_name_en: # Ensure it's not an empty string for index 0
+        if month_name_en:
              MONTH_MAP_FOR_NAV[month_name_en.capitalize()] = i
 
 REVERSE_MONTH_MAP_FOR_NAV = {v: k for k, v in MONTH_MAP_FOR_NAV.items()}
 
-# Adaugă aici și alte constante dacă identificăm ulterior
-# De exemplu, SQL-ul pentru structura DB va merge în db_handler.py
-
 APP_COPYRIGHT = f"© {datetime.now().year} Regio Development. Toate drepturile rezervate."
+
+# Constante pentru comunicare inter-proces
+SESSION_COMMAND_PORT = 12343
+VIEWER_COMMAND_PORT = 12344
+CHAT_COMMAND_PORT = 12345
+
+# Constante pentru combinațiile de taste globale
+GLOBAL_HOTKEY_CHAT = 'ctrl+alt+c'
+GLOBAL_HOTKEY_VIEWER = 'ctrl+alt+b'

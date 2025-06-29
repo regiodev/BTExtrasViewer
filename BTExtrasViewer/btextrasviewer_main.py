@@ -11,11 +11,22 @@ from tkcalendar import DateEntry
 import re 
 from queue import Queue, Empty 
 import threading
+import socket
+import sys
+import subprocess
+import json
+import base64
+import argparse
+import time
+from common.app_constants import CHAT_COMMAND_PORT, VIEWER_COMMAND_PORT, SESSION_COMMAND_PORT
 
-# --- BLOCUL DE IMPORTURI REVIZUIT ---
 
 # Importurile din pachetul comun (common/)
-from common.app_constants import APP_NAME, APP_VERSION, APP_COPYRIGHT, DEFAULT_TREEVIEW_DISPLAY_COLUMNS, MONTH_MAP_FOR_NAV, REVERSE_MONTH_MAP_FOR_NAV
+from common.app_constants import (
+    APP_NAME, APP_VERSION, APP_COPYRIGHT, DEFAULT_TREEVIEW_DISPLAY_COLUMNS,
+    MONTH_MAP_FOR_NAV, REVERSE_MONTH_MAP_FOR_NAV, CHAT_COMMAND_PORT,
+    VIEWER_COMMAND_PORT, SESSION_COMMAND_PORT
+)
 from common import config_management # <-- MODIFICARE CHEIE AICI
 from common.db_handler import DatabaseHandler, MariaDBConfigDialog
 from common import auth_handler
@@ -28,9 +39,30 @@ from . import ui_utils
 from .ui_dialogs import (
     AccountManagerDialog, AccountEditDialog, TransactionTypeManagerDialog, 
     SMTPConfigDialog, BalanceReportConfigDialog, LoginDialog, 
-    UserManagerDialog, RoleManagerDialog, SwiftCodeManagerDialog, CurrencyManagerDialog
+    UserManagerDialog, RoleManagerDialog, SwiftCodeManagerDialog, CurrencyManagerDialog,
+    ForcePasswordChangeDialog
 )
 # --- SFÂRȘIT BLOC DE IMPORTURI REVIZUIT ---
+
+def notify_session_manager(user_data):
+    """Notifică Session Manager despre utilizatorul autentificat."""
+    # Convertim set-urile (care nu sunt serializabile JSON) în liste
+    user_data_copy = user_data.copy()
+    if 'permissions' in user_data_copy and isinstance(user_data_copy['permissions'], set):
+        user_data_copy['permissions'] = list(user_data_copy['permissions'])
+    if 'allowed_accounts' in user_data_copy and isinstance(user_data_copy['allowed_accounts'], set):
+        user_data_copy['allowed_accounts'] = list(user_data_copy['allowed_accounts'])
+
+    try:
+        user_data_json = json.dumps(user_data_copy)
+        command = f"SET_USER {user_data_json}"
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            s.connect(('127.0.0.1', SESSION_COMMAND_PORT))
+            s.sendall(command.encode('utf-8'))
+        print("INFO (Viewer): Session Manager a fost notificat despre utilizatorul curent.")
+    except Exception as e:
+        print(f"EROARE (Viewer): Nu s-a putut notifica Session Manager: {e}")
 
 class BTViewerApp:
     def __init__(self, master, user_data, db_handler, user_settings):
@@ -115,6 +147,111 @@ class BTViewerApp:
         # Pornim popularea UI
         self.init_step4_populate_ui()
 
+        # Pornim serverul de comenzi
+        self.command_server_thread = threading.Thread(target=self._listen_for_commands, daemon=True)
+        self.command_server_thread.start()
+
+    def _launch_or_show_chat(self):
+        """
+        Versiune finală, robustă: Verifică dacă aplicația de chat rulează.
+        Dacă da, o aduce în față. Dacă nu, o pornește, funcționând corect
+        atât în mod de dezvoltare, cât și după compilare.
+        """
+        try:
+            # Încercăm să ne conectăm la serverul de comenzi al chat-ului
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                s.connect(('127.0.0.1', CHAT_COMMAND_PORT))
+                # Trimitem comanda CORECTĂ, fără underscore-uri
+                s.sendall(b'SHOW_WINDOW')
+            print("INFO: Comanda 'SHOW' a fost trimisă către aplicația de chat existentă.")
+        
+        except (ConnectionRefusedError, socket.timeout):
+            # Dacă nu ne putem conecta, înseamnă că chat-ul nu rulează, deci îl pornim
+            print("INFO: Aplicația de chat nu rulează. Se pornește acum...")
+            try:
+                # Logica robustă pentru a găsi calea executabilului
+                if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+                    application_path = os.path.dirname(sys.executable)
+                    chat_executable_path = os.path.join(application_path, 'BTExtrasChat', 'BTExtrasChat.exe')
+                    command = [chat_executable_path]
+                else:
+                    command = [sys.executable, '-m', 'BTExtrasChat.chat_main']
+                
+                print(f"INFO: Se execută comanda de lansare: {' '.join(command)}")
+                
+                subprocess.Popen(command, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+
+            except FileNotFoundError:
+                 messagebox.showerror("Eroare Lansare Chat", f"Executabilul pentru chat nu a fost găsit la calea așteptată:\n{chat_executable_path}\n\nAsigurați-vă că ambele aplicații sunt instalate corect.", parent=self.master)
+            except Exception as e:
+                messagebox.showerror("Eroare Lansare Chat", f"Nu s-a putut lansa aplicația de chat:\n{e}", parent=self.master)
+        
+        except Exception as e:
+            messagebox.showerror("Eroare Necunoscută", f"A apărut o eroare la comunicarea cu aplicația de chat:\n{e}", parent=self.master)
+
+    def _on_closing(self):
+        """
+        La apăsarea pe 'X', salvează starea curentă a UI-ului și doar
+        ascunde fereastra, fără a închide aplicația.
+        """
+        # Pas 1: Colectăm detaliile ferestrei (dimensiune, poziție)
+        # la fel cum făcea handle_app_exit.
+        window_details = {}
+        if self.master.winfo_exists():
+            # Salvăm starea ferestrei doar dacă nu este maximizată
+            if self.master.state() == 'normal':
+                try:
+                    window_details = {
+                        'width': str(self.master.winfo_width()),
+                        'height': str(self.master.winfo_height()),
+                        'x': str(self.master.winfo_x()),
+                        'y': str(self.master.winfo_y())
+                    }
+                except tk.TclError:
+                    pass # Fereastra ar putea fi deja pe cale de a fi distrusă
+
+        # Pas 2: Apelăm direct funcția de salvare a configurației,
+        # pasându-i detaliile ferestrei. Aceasta NU distruge fereastra.
+        config_management.save_app_config(self, window_details=window_details)
+
+        # Pas 3: Acum, ascundem fereastra în siguranță.
+        if self.master.winfo_exists():
+            self.master.withdraw()
+
+    def _show_window(self):
+        """Readuce fereastra în prim-plan și îi dă focus."""
+        # Folosim self.master.after pentru a ne asigura că se execută pe thread-ul UI
+        self.master.after(0, lambda: {
+            self.master.deiconify(), # Afișează fereastra
+            self.master.lift(), # O aduce deasupra altor ferestre
+            self.master.attributes('-topmost', 1), # Forțează să fie deasupra
+            self.master.after(100, lambda: self.master.attributes('-topmost', 0)), # Renunță la a fi mereu deasupra
+            self.master.focus_force() # Îi dă focus
+        })
+
+    def _listen_for_commands(self):
+        """Rulează într-un thread separat și ascultă comenzi (ex: de la SessionManager)."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+                server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server_socket.bind(('127.0.0.1', VIEWER_COMMAND_PORT))
+                server_socket.listen()
+                # MESAJ DE DIAGNOSTICARE ESENȚIAL:
+                print(f"INFO (Viewer): Serverul de comenzi a pornit și ascultă pe portul {VIEWER_COMMAND_PORT}.")
+
+                while True:
+                    # Așteaptă o conexiune (blocant)
+                    conn, addr = server_socket.accept()
+                    with conn:
+                        data = conn.recv(1024)
+                        if data == b'SHOW_WINDOW':
+                            print("INFO (Viewer): Comanda SHOW_WINDOW primită.")
+                            self._show_window()
+        except Exception as e:
+            # Acest mesaj va apărea dacă serverul nu poate porni deloc
+            print(f"EROARE CRITICĂ: Serverul de comenzi al Viewer-ului NU a putut porni: {e}")
+
     def _apply_user_settings(self):
         """Aplică setările încărcate din DB la componentele UI."""
         if not self.user_settings:
@@ -141,12 +278,14 @@ class BTViewerApp:
         self._on_search_column_changed()
 
     def _load_visible_transaction_types(self):
-        """Încarcă din config.ini codurile de tranzacții vizibile."""
+        """Încarcă din profilul utilizatorului (user_settings) codurile de tranzacții vizibile."""
         if not (self.db_handler and self.db_handler.is_connected()):
             self.visible_tx_codes = []
             return
 
-        visibility_settings = config_management.load_transaction_type_visibility()
+        # MODIFICARE: Citim setările din dicționarul încărcat la pornire
+        visibility_settings = self.user_settings.get('transaction_type_visibility', {})
+        
         all_types = self.db_handler.fetch_all_dict("SELECT cod FROM tipuri_tranzactii")
         if not all_types:
             self.visible_tx_codes = []
@@ -155,7 +294,8 @@ class BTViewerApp:
         all_codes = [item['cod'] for item in all_types]
         visible_codes = []
         for code in all_codes:
-            if visibility_settings.get(code, True):
+            # Cheia în dicționar este salvată cu litere mici
+            if visibility_settings.get(code.lower(), True): # Default este True (vizibil)
                 visible_codes.append(code)
 
         self.visible_tx_codes = visible_codes
@@ -198,7 +338,9 @@ class BTViewerApp:
         if not (self.db_handler and self.db_handler.is_connected()):
             messagebox.showwarning("Fără Conexiune", "Trebuie să fiți conectat la baza de date.", parent=self.master)
             return
-        TransactionTypeManagerDialog(self.master, self.db_handler)
+        # MODIFICARE: Pasăm 'self' (instanța aplicației) la dialog
+        TransactionTypeManagerDialog(self.master, self.db_handler, self)
+        # După închiderea dialogului, reîncărcăm vizibilitatea și reîmprospătăm UI-ul
         self._load_visible_transaction_types()
         self.refresh_ui_for_account_change()
            
@@ -419,6 +561,9 @@ class BTViewerApp:
         self.export_button.pack(side=tk.LEFT, padx=5)
         self.import_button = tk.Button(action_buttons_frame, text="Importă fișier MT940", command=self.import_mt940, font=(default_font_family, default_font_size), relief=tk.RAISED, borderwidth=2)
         self.import_button.pack(side=tk.LEFT, padx=5)
+
+        self.chat_button = tk.Button(action_buttons_frame, text="Chat", command=self._launch_or_show_chat, font=(default_font_family, default_font_size, 'bold'), relief=tk.RAISED, borderwidth=2, background="#E8DAEF", activebackground="#D2B4DE")
+        self.chat_button.pack(side=tk.LEFT, padx=5)
 
         row2_frame = tk.Frame(top_controls_container)
         row2_frame.pack(fill=tk.X, expand=True, pady=(5,0))
@@ -2158,8 +2303,39 @@ class BTViewerApp:
             try: self.master.destroy()
             except tk.TclError: pass
 
+    def on_closing(self):
+        """La apăsarea pe 'X', fereastra doar se ascunde, nu se închide."""
+        self.master.withdraw()
+
+    def _show_window(self):
+        """Readuce fereastra în prim-plan și îi dă focus."""
+        self.master.after(0, lambda: {
+            self.master.deiconify(),
+            self.master.lift(),
+            self.master.attributes('-topmost', 1),
+            self.master.after(100, lambda: self.master.attributes('-topmost', 0)),
+            self.master.focus_force()
+        })
+
+    def _listen_for_commands(self):
+        """Ascultă comenzi pe un port dedicat."""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+                server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server_socket.bind(('127.0.0.1', VIEWER_COMMAND_PORT))
+                server_socket.listen()
+                print(f"INFO (Viewer): Serverul de comenzi ascultă pe portul {VIEWER_COMMAND_PORT}.")
+                while True:
+                    conn, addr = server_socket.accept()
+                    with conn:
+                        data = conn.recv(1024)
+                        if data == b'SHOW_WINDOW':
+                            print("INFO (Viewer): Comanda SHOW_WINDOW primită.")
+                            self._show_window()
+        except Exception as e:
+            print(f"EROARE CRITICĂ: Serverul de comenzi al Viewer-ului NU a putut porni: {e}")
+
 if __name__ == "__main__":
-    # 1. Inițializare logging
     log_file_path = os.path.join(config_management.APP_DATA_DIR, 'app_activity.log')
     logging.basicConfig(
         level=logging.INFO,
@@ -2169,93 +2345,76 @@ if __name__ == "__main__":
         encoding='utf-8'
     )
 
-    # 2. Secvența de pornire și autentificare
-    db_handler = None
-    temp_root = tk.Tk()
-    temp_root.withdraw()
+    db_handler_main = None
+    temp_root_main = tk.Tk()
+    temp_root_main.withdraw()
 
     try:
-        # Pasul A: Citirea configurației DB
         config = configparser.ConfigParser()
-        db_credentials = None
+        db_credentials_main = None
         if os.path.exists(config_management.CONFIG_FILE):
             config.read(config_management.CONFIG_FILE, encoding='utf-8')
-            db_credentials = config_management.read_db_config_from_parser(config)
+            db_credentials_main = config_management.read_db_config_from_parser(config)
 
-        # Pasul B: Conectarea la Baza de Date
-        db_handler = DatabaseHandler(db_credentials=db_credentials, app_master_ref=temp_root)
-        if not db_handler.connect():
-            dialog = MariaDBConfigDialog(temp_root, initial_config=(db_credentials or {}))
-            creds = dialog.result
+        db_handler_main = DatabaseHandler(db_credentials=db_credentials_main, app_master_ref=temp_root_main)
+        if not db_handler_main.connect():
+            dialog_db = MariaDBConfigDialog(temp_root_main, initial_config=(db_credentials_main or {}))
+            creds = dialog_db.result
             if creds and all(creds.values()):
-                db_handler.db_credentials = creds
-                if not db_handler.connect():
-                    raise ConnectionError("Conectarea la DB a eșuat chiar și după introducerea manuală a credențialelor.")
-            else:
-                raise ConnectionError("Configurarea conexiunii DB a fost anulată.")
+                db_handler_main.db_credentials = creds
+                config_management.save_db_credentials(creds)
+                if not db_handler_main.connect():
+                    raise ConnectionError("Eroare reconectare DB.")
+            else: raise ConnectionError("Configurare DB anulată.")
 
-        # Pasul C: Verificarea și crearea schemei DB
-        if not db_handler.check_and_setup_database_schema():
-            raise SystemError("Schema bazei de date nu a putut fi verificată sau creată.")
+        if not db_handler_main.check_and_setup_database_schema():
+            raise SystemError("Schema DB nu a putut fi creată/verificată.")
 
-        # Pasul D: Afișarea ferestrei de Login
-        login_dialog = LoginDialog(temp_root, db_handler)
-        user_data = login_dialog.result
+        while True:
+            login_dialog = LoginDialog(temp_root_main, db_handler_main)
+            user_data = login_dialog.result
+            if not user_data: raise PermissionError("Autentificare anulată.")
+            if user_data.get('force_password_change') in [True, 1]:
+                messagebox.showinfo("Schimbare Parolă", "Schimbați parola inițială.", parent=temp_root_main)
+                change_dialog = ForcePasswordChangeDialog(temp_root_main, db_handler_main, user_data['id'], user_data['username'])
+                if change_dialog.result: continue 
+                else: raise PermissionError("Schimbare parolă anulată.")
+            break
+        
+        notify_session_manager(user_data)
+        user_settings = db_handler_main.get_user_settings(user_data['id'])
+        temp_root_main.destroy()
 
-        if not user_data:
-            raise PermissionError("Autentificare anulată de utilizator.")
-
-        # --- Autentificare reușită. Urmează pornirea aplicației principale. ---
-
-        user_settings = db_handler.get_user_settings(user_data['id'])
-
-        temp_root.destroy()
-
-        # Pasul F: Crearea și rularea ferestrei principale
         root = tk.Tk()
-
         try:
-            # Construiește calea către icon într-un mod robust, indiferent de unde este rulat scriptul
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            icon_path = os.path.join(script_dir, 'assets', 'BT_logo.ico')
-            
-            # Verifică dacă fișierul există înainte de a-l seta
-            if os.path.exists(icon_path):
-                root.iconbitmap(icon_path)
-            else:
-                logging.warning(f"Fișierul icon nu a fost găsit la calea: {icon_path}")
+            base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+            icon_path = os.path.join(base_path, '..', 'assets', 'BT_logo.ico')
+            if os.path.exists(icon_path): root.iconbitmap(icon_path)
         except Exception as e:
-            # Prinde orice altă eroare (ex: tkinter.TclError dacă formatul e invalid)
-            logging.error(f"Nu s-a putut seta iconul aplicației: {e}")
-
+            logging.error(f"Nu s-a putut seta iconul: {e}")
+        
         window_cfg = user_settings.get('window', {})
-        window_geom = f"{window_cfg.get('width')}x{window_cfg.get('height')}+{window_cfg.get('x')}+{window_cfg.get('y')}" if window_cfg else None
-
+        window_geom = f"{window_cfg.get('width')}x{window_cfg.get('height')}+{window_cfg.get('x')}+{window_cfg.get('y')}" if window_cfg and all(k in window_cfg for k in ['width', 'height', 'x', 'y']) else None
         if window_geom:
-            try:
-                root.geometry(window_geom)
-            except tk.TclError:
-                root.state('zoomed') # Fallback la maximizat
+            try: root.geometry(window_geom)
+            except tk.TclError: root.state('zoomed')
         else:
             root.state('zoomed')
 
-        app = BTViewerApp(root, user_data=user_data, db_handler=db_handler, user_settings=user_settings)
-        
-        root.protocol("WM_DELETE_WINDOW", lambda: ui_utils.handle_app_exit(app, root))
-        
+        app = BTViewerApp(root, user_data=user_data, db_handler=db_handler_main, user_settings=user_settings)
+        # Modificăm protocolul de închidere pentru a apela noua noastră metodă
+        root.protocol("WM_DELETE_WINDOW", app.on_closing)
         root.mainloop()
 
     except (ConnectionError, SystemError, PermissionError) as e:
-        if db_handler and db_handler.is_connected():
-            db_handler.close_connection()
-        messagebox.showerror("Eroare la Pornire", str(e), parent=temp_root)
+        if 'db_handler_main' in locals() and db_handler_main.is_connected(): db_handler_main.close_connection()
+        if 'temp_root_main' in locals() and temp_root_main.winfo_exists():
+            messagebox.showerror("Eroare la Pornire", str(e), parent=temp_root_main)
+            temp_root_main.destroy()
         logging.error(f"Pornire eșuată: {e}")
-        if temp_root.winfo_exists():
-            temp_root.destroy()
     except Exception as e_main:
-        if db_handler and db_handler.is_connected():
-            db_handler.close_connection()
-        logging.critical(f"Eroare neașteptată în procesul de pornire: {e_main}", exc_info=True)
-        messagebox.showerror("Eroare Critică", f"A apărut o eroare neașteptată la pornire: {e_main}", parent=temp_root)
-        if temp_root.winfo_exists():
-            temp_root.destroy()
+        if 'db_handler_main' in locals() and db_handler_main.is_connected(): db_handler_main.close_connection()
+        logging.critical(f"Eroare neașteptată: {e_main}", exc_info=True)
+        if 'temp_root_main' in locals() and temp_root_main.winfo_exists():
+            messagebox.showerror("Eroare Critică", f"Eroare neașteptată: {e_main}", parent=temp_root_main)
+            temp_root_main.destroy()

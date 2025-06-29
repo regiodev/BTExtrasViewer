@@ -96,10 +96,11 @@ CREATE TABLE IF NOT EXISTS utilizatori (
     activ BOOLEAN DEFAULT TRUE,
     data_creare TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     setari_ui JSON DEFAULT NULL,
-    tranzactie_acces ENUM('toate', 'credit', 'debit') NOT NULL DEFAULT 'toate'
+    tranzactie_acces ENUM('toate', 'credit', 'debit') NOT NULL DEFAULT 'toate',
+    parola_schimbata_necesar BOOLEAN NOT NULL DEFAULT TRUE,
+    last_seen TIMESTAMP NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
-# Notă: Scriptul de mai sus este doar pentru referință, presupunând că ALTER a fost deja rulat.
 
 DB_STRUCTURE_ROLURI = """
 CREATE TABLE IF NOT EXISTS roluri (
@@ -351,39 +352,66 @@ class DatabaseHandler:
         return self.conn is not None and self.conn.is_connected()
 
     def check_and_setup_database_schema(self):
-        if not self.is_connected(): return False
+        """
+        Verifică și creează tabelele necesare.
+        Verifică și adaugă coloanele lipsă pentru a asigura compatibilitatea.
+        """
+        if not self.is_connected():
+            return False
         
-        logging.info("Verificare și configurare schemă bază de date...")
-        
-        all_tables_scripts = [
+        cursor = None # Inițializăm cursorul ca None în afara blocului try
+        try:
+            cursor = self.conn.cursor()
+            db_name = self.db_credentials.get('database')
+            if not db_name:
+                logging.error("Numele bazei de date nu este configurat.")
+                return False
+
+            logging.info("Verificare și creare schemă DB...")
+            
+            all_tables_scripts = [
                 DB_STRUCTURE_CONTURI_BANCARE_MARIADB, DB_STRUCTURE_TIPURI_TRANZACTII_MARIADB,
                 DB_STRUCTURE_UTILIZATORI, DB_STRUCTURE_ROLURI, DB_STRUCTURE_TRANZACTII_V2_MARIADB,
                 CREATE_TABLE_ISTORIC_IMPORTURI, DB_STRUCTURE_UTILIZATORI_ROLURI,
                 DB_STRUCTURE_ROLURI_PERMISIUNI, DB_STRUCTURE_UTILIZATORI_CONTURI,
-                DB_STRUCTURE_JURNAL_ACTIUNI,
-                DB_STRUCTURE_SWIFT_CODES,
-                DB_STRUCTURE_VALUTE,
-                # Adăugăm noile tabele pentru chat la finalul listei
-                DB_STRUCTURE_CHAT_CONVERSATII,
-                DB_STRUCTURE_CHAT_PARTICIPANTI,
-                DB_STRUCTURE_CHAT_MESAJE
+                DB_STRUCTURE_JURNAL_ACTIUNI, DB_STRUCTURE_SWIFT_CODES,
+                DB_STRUCTURE_VALUTE, DB_STRUCTURE_CHAT_CONVERSATII,
+                DB_STRUCTURE_CHAT_PARTICIPANTI, DB_STRUCTURE_CHAT_MESAJE
             ]
-        
-        try:
-            with self.conn.cursor() as cursor:
-                for table_script in all_tables_scripts:
-                    cursor.execute(table_script)
+            for table_script in all_tables_scripts:
+                cursor.execute(table_script)
+            
+            # Verificare și adăugare coloane lipsă (migrare schemă)
+            cursor.execute(f"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'utilizatori' AND COLUMN_NAME = 'parola_schimbata_necesar'")
+            if cursor.fetchone()[0] == 0:
+                logging.warning("Coloana 'parola_schimbata_necesar' lipsește. Se adaugă...")
+                cursor.execute("ALTER TABLE utilizatori ADD COLUMN parola_schimbata_necesar BOOLEAN NOT NULL DEFAULT TRUE")
+                logging.info("Coloana 'parola_schimbata_necesar' a fost adăugată cu succes.")
+
+            cursor.execute(f"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'utilizatori' AND COLUMN_NAME = 'last_seen'")
+            if cursor.fetchone()[0] == 0:
+                logging.warning("Coloana 'last_seen' lipsește. Se adaugă...")
+                cursor.execute("ALTER TABLE utilizatori ADD COLUMN last_seen TIMESTAMP NULL")
+                logging.info("Coloana 'last_seen' a fost adăugată cu succes.")
+
             self.conn.commit()
-            logging.info("Toate tabelele au fost verificate/create cu succes.")
+            
+            # Populăm datele inițiale dacă este necesar.
             self._seed_initial_data()
             self._seed_swift_codes_table()
             self._seed_valute_table()
+            
+            logging.info("Schema DB este validă și actualizată.")
             return True
-        
         except mysql.connector.Error as err:
-            logging.error(f"Eroare la crearea schemei DB: {err.msg}")
-            self.conn.rollback()
+            logging.error(f"Eroare la verificarea/crearea schemei DB: {err}")
+            self.conn.rollback() 
+            messagebox.showerror("Eroare Bază de Date", f"A apărut o problemă la verificarea structurii bazei de date:\n{err}", parent=self.app_master_ref)
             return False
+        finally:
+            # MODIFICARE: Verificăm doar dacă cursorul a fost creat înainte de a-l închide.
+            if cursor:
+                cursor.close()
 
     def _seed_initial_data(self):
         if not self.is_connected(): return
@@ -668,9 +696,21 @@ class DatabaseHandler:
 
     # --- METODĂ MODIFICATĂ ---
     def get_user_by_username(self, username):
-        # Adăugăm 'nume_complet' și 'tranzactie_acces' la interogare
-        query = "SELECT id, username, nume_complet, parola_hash, salt, activ, tranzactie_acces FROM utilizatori WHERE username = %s"
-        return self.fetch_one_dict(query, (username,))
+        """Returnează datele utilizatorului, inclusiv steagul pentru schimbarea parolei."""
+        query = """
+            SELECT 
+                id, username, nume_complet, parola_hash, salt, activ, 
+                tranzactie_acces, parola_schimbata_necesar 
+            FROM utilizatori 
+            WHERE username = %s
+        """
+        
+        # --- BLOC NOU DE DEPANARE AVANSATĂ ---
+        print("\n[DB_HANDLER DEBUG] Se execută interogarea pentru get_user_by_username...")
+        result_dict = self.fetch_one_dict(query, (username,))
+        print(f"[DB_HANDLER DEBUG] Rezultat brut primit de la fetch_one_dict: {result_dict}\n")
+        return result_dict
+        # --- SFÂRȘIT BLOC ---
 
     # --- METODĂ MODIFICATĂ ---
     def get_user_details(self, user_id):

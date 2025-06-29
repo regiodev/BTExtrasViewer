@@ -388,23 +388,30 @@ class AccountManagerDialog(simpledialog.Dialog):
                 messagebox.showerror("Eroare Ștergere", f"Eroare: {e}", parent=self)
 
 class TransactionTypeManagerDialog(simpledialog.Dialog):
-    def __init__(self, parent, db_handler):
+    def __init__(self, parent, db_handler, app_instance):
         self.db_handler = db_handler
-        self.parent = parent
+        # MODIFICARE: Salvăm o referință la instanța aplicației principale
+        self.app_instance = app_instance 
         self.check_vars = {}
-        self.visibility_settings = config_management.load_transaction_type_visibility()
+        
+        # MODIFICARE: Citim setările din profilul utilizatorului, nu dintr-un fișier global
+        if 'transaction_type_visibility' not in self.app_instance.user_settings:
+            self.app_instance.user_settings['transaction_type_visibility'] = {}
+        self.visibility_settings = self.app_instance.user_settings['transaction_type_visibility']
+
         super().__init__(parent, "Gestionare Vizibilitate Tipuri Tranzacții")
+
     def body(self, master):
         self.tree_frame = ttk.Frame(master)
         self.tree_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
-        cols = ("cod", "descriere_tip", "vizibilitate_locala")
+        cols = ("cod", "descriere_tip", "vizibilitate")
         self.types_tree = ttk.Treeview(self.tree_frame, columns=cols, show="headings", selectmode="browse")
         self.types_tree.heading("cod", text="Cod Tehnic")
         self.types_tree.heading("descriere_tip", text="Descriere Personalizată")
-        self.types_tree.heading("vizibilitate_locala", text="Vizibil Local (în Liste/Rapoarte)")
+        self.types_tree.heading("vizibilitate", text="Vizibil în Liste/Rapoarte")
         self.types_tree.column("cod", width=100, anchor="w", stretch=False)
         self.types_tree.column("descriere_tip", width=300, anchor="w")
-        self.types_tree.column("vizibilitate_locala", width=200, anchor="center", stretch=False)
+        self.types_tree.column("vizibilitate", width=200, anchor="center", stretch=False)
         self.types_tree.tag_configure('vizibil', background='#D5F5E3')
         self.types_tree.tag_configure('ascuns', background='#FADBD8')
         self.types_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -412,6 +419,7 @@ class TransactionTypeManagerDialog(simpledialog.Dialog):
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.types_tree.configure(yscrollcommand=scrollbar.set)
         self.types_tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        
         button_container = ttk.Frame(master)
         button_container.pack(side=tk.BOTTOM, fill=tk.X, pady=(0,10), padx=10)
         self.edit_button = ttk.Button(button_container, text="Modifică Descriere", command=self._on_edit_description, state=tk.DISABLED)
@@ -419,22 +427,29 @@ class TransactionTypeManagerDialog(simpledialog.Dialog):
         self.toggle_button = ttk.Button(button_container, text="Comută Vizibilitate", command=self._on_toggle_visibility, state=tk.DISABLED)
         self.toggle_button.pack(side=tk.LEFT, padx=5)
         ttk.Button(button_container, text="Închide", command=self.ok).pack(side=tk.RIGHT, padx=5)
+        
         self.load_transaction_types()
         return self.types_tree
-    def buttonbox(self): pass
+
+    def buttonbox(self):
+        pass
+
     def load_transaction_types(self):
         for item in self.types_tree.get_children(): self.types_tree.delete(item)
         if not self.db_handler.is_connected(): return
+        
         types_data = self.db_handler.fetch_all_dict("SELECT cod, descriere_tip FROM tipuri_tranzactii ORDER BY cod")
         if types_data:
             for type_info in types_data:
                 cod = type_info['cod']
-                is_visible = self.visibility_settings.get(cod.lower(), True)
+                # Folosim cheia cu litere mici pentru consistență
+                is_visible = self.visibility_settings.get(cod.lower(), True) 
                 visibility_text = "Vizibil" if is_visible else "Ascuns"
                 row_tag = 'vizibil' if is_visible else 'ascuns'
                 values = (cod, type_info['descriere_tip'], visibility_text)
                 self.types_tree.insert("", tk.END, iid=cod, values=values, tags=(row_tag,))
         self._on_tree_select(None)
+
     def _on_tree_select(self, event):
         selected_items = self.types_tree.selection()
         if selected_items:
@@ -445,6 +460,7 @@ class TransactionTypeManagerDialog(simpledialog.Dialog):
             self.selected_code = None
             self.edit_button.config(state=tk.DISABLED)
             self.toggle_button.config(state=tk.DISABLED)
+
     def _on_edit_description(self):
         if not self.selected_code: return
         current_description = self.types_tree.item(self.selected_code, 'values')[1]
@@ -452,12 +468,16 @@ class TransactionTypeManagerDialog(simpledialog.Dialog):
         if new_description and new_description.strip():
             if self.db_handler.execute_commit("UPDATE tipuri_tranzactii SET descriere_tip = %s WHERE cod = %s", (new_description.strip(), self.selected_code)):
                 self.load_transaction_types()
+
     def _on_toggle_visibility(self):
         if not self.selected_code: return
         cod_key = self.selected_code.lower()
         current_visibility = self.visibility_settings.get(cod_key, True)
         self.visibility_settings[cod_key] = not current_visibility
-        config_management.save_transaction_type_visibility(self.visibility_settings)
+        
+        # MODIFICARE: Salvăm întregul bloc de setări în DB prin funcția centralizată
+        config_management.save_app_config(self.app_instance)
+        
         self.load_transaction_types()
 
 class SMTPConfigDialog(simpledialog.Dialog):
@@ -579,6 +599,7 @@ class LoginDialog(simpledialog.Dialog):
     def __init__(self, parent, db_handler):
         self.db_handler = db_handler
         super().__init__(parent, "Autentificare BTExtrasViewer")
+
     def body(self, master):
         master.grid_columnconfigure(0, weight=1)
         master.grid_columnconfigure(1, weight=1)
@@ -589,43 +610,64 @@ class LoginDialog(simpledialog.Dialog):
         self.password_entry = tk.Entry(master, show="*", width=30)
         self.password_entry.grid(row=1, column=1, padx=5, pady=5)
         self.parent = master.winfo_toplevel()
+        # Asigurăm centrarea corectă a ferestrei
         self.parent.update_idletasks()
         x = self.parent.winfo_rootx() + (self.parent.winfo_width() // 2) - (self.winfo_width() // 2)
         y = self.parent.winfo_rooty() + (self.parent.winfo_height() // 2) - (self.winfo_height() // 2)
-        self.geometry(f"+{x}+{y}")
+        if x > 0 and y > 0: # Prevenim poziționarea în afara ecranului
+            self.geometry(f"+{x}+{y}")
         return self.username_entry
+
     def validate(self):
         username = self.username_entry.get().strip()
         password = self.password_entry.get()
         if not username or not password:
             messagebox.showwarning("Date lipsă", "Numele de utilizator și parola sunt obligatorii.", parent=self)
             return False
+        
         user_db_data = self.db_handler.get_user_by_username(username)
+        
         if not user_db_data:
             messagebox.showerror("Autentificare eșuată", "Nume de utilizator sau parolă incorectă.", parent=self)
             return False
+        
         if not user_db_data.get('activ'):
             messagebox.showerror("Cont inactiv", "Acest cont de utilizator este inactiv.", parent=self)
             return False
-        is_password_valid = auth_handler.verifica_parola(parola_introdusa=password, salt_hex=user_db_data['salt'], hash_stocat_hex=user_db_data['parola_hash'])
+            
+        is_password_valid = auth_handler.verifica_parola(
+            parola_introdusa=password, 
+            salt_hex=user_db_data['salt'], 
+            hash_stocat_hex=user_db_data['parola_hash']
+        )
+
         if not is_password_valid:
             messagebox.showerror("Autentificare eșuată", "Nume de utilizator sau parolă incorectă.", parent=self)
             return False
+            
         user_id = user_db_data['id']
         permissions = self.db_handler.get_user_permissions(user_id)
         allowed_accounts = self.db_handler.get_allowed_accounts_for_user(user_id)
+        
+        # --- BLOCUL DE COD CORECT ȘI COMPLET ---
         self.result = {
             'id': user_id,
             'username': username,
-            'nume_complet': user_db_data.get('nume_complet'), # <-- LINIE NOUĂ
+            'nume_complet': user_db_data.get('nume_complet'),
             'permissions': permissions, 
             'allowed_accounts': allowed_accounts,
             'has_all_permissions': 'all_permissions' in permissions,
-            'tranzactie_acces': user_db_data.get('tranzactie_acces', 'toate')
+            'tranzactie_acces': user_db_data.get('tranzactie_acces', 'toate'),
+            # LINIA CRUCIALĂ CARE ACUM ESTE PREZENTĂ:
+            'force_password_change': user_db_data.get('parola_schimbata_necesar')
         }
+        # --- SFÂRȘIT BLOC ---
+        
         self.db_handler.log_action(user_id, username, "Login reușit")
         return True
-    def apply(self): pass
+
+    def apply(self):
+        pass # Nu este necesar, validarea face totul
 
 class UserEditDialog(simpledialog.Dialog):
     """Dialog modal pentru adăugarea sau modificarea unui utilizator, bazat pe roluri."""
@@ -1092,3 +1134,61 @@ class CurrencyManagerDialog(simpledialog.Dialog):
                 self.load_currencies()
             else:
                 messagebox.showerror("Ștergere Eșuată", message, parent=self)
+
+class ForcePasswordChangeDialog(simpledialog.Dialog):
+    """Dialog modal care forțează utilizatorul să schimbe parola."""
+    def __init__(self, parent, db_handler, user_id, username):
+        self.db_handler = db_handler
+        self.user_id = user_id
+        self.username = username
+        self.result = None  # Inițializăm rezultatul
+        super().__init__(parent, "Schimbare Parolă Obligatorie")
+
+    def body(self, master):
+        ttk.Label(master, text=f"Utilizator: {self.username}", font=("TkDefaultFont", 10, "bold")).grid(row=0, columnspan=2, pady=(5,10))
+        ttk.Label(master, text="Parolă nouă:").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        self.new_pass_entry = ttk.Entry(master, show="*", width=30)
+        self.new_pass_entry.grid(row=1, column=1, padx=5, pady=2)
+
+        ttk.Label(master, text="Confirmare parolă:").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        self.confirm_pass_entry = ttk.Entry(master, show="*", width=30)
+        self.confirm_pass_entry.grid(row=2, column=1, padx=5, pady=2)
+        
+        return self.new_pass_entry # Focus pe primul câmp de parolă
+
+    def validate(self):
+        """Validează datele introduse de utilizator."""
+        new_pass = self.new_pass_entry.get()
+        confirm_pass = self.confirm_pass_entry.get()
+
+        if not new_pass or not confirm_pass:
+            messagebox.showwarning("Date Incomplete", "Ambele câmpuri pentru parolă sunt obligatorii.", parent=self)
+            return False
+        
+        if new_pass != confirm_pass:
+            messagebox.showerror("Parole Diferite", "Parolele introduse nu se potrivesc.", parent=self)
+            self.confirm_pass_entry.focus_set()
+            return False
+            
+        if len(new_pass) < 8:
+            messagebox.showwarning("Parolă Prea Scurtă", "Parola trebuie să conțină cel puțin 8 caractere.", parent=self)
+            return False
+            
+        return True
+
+    def apply(self):
+        """Aplică schimbarea parolei în baza de date."""
+        new_password = self.new_pass_entry.get()
+        salt, pass_hash = auth_handler.hash_parola(new_password)
+        
+        sql = """
+            UPDATE utilizatori 
+            SET parola_hash = %s, salt = %s, parola_schimbata_necesar = FALSE 
+            WHERE id = %s
+        """
+        if self.db_handler.execute_commit(sql, (pass_hash, salt, self.user_id)):
+            messagebox.showinfo("Succes", "Parola a fost schimbată. Vă rugăm să vă autentificați din nou cu noua parolă.", parent=self.master)
+            self.result = True
+        else:
+            messagebox.showerror("Eroare DB", "Nu s-a putut actualiza parola în baza de date.", parent=self)
+            self.result = False
