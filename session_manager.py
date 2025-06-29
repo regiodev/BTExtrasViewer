@@ -145,28 +145,48 @@ class SessionManager:
             print(f"EROARE la lansarea '{app_type}': {e}")
 
     def quit_all(self, icon=None, item=None):
-        print("INFO: Se inițiază procedura de închidere...")
+        """Închide forțat și garantat toate procesele copil, apoi aplicația."""
+        print("INFO: Se inițiază procedura de închidere robustă...")
         
-        # Folosim PID-urile stocate pentru a ucide procesele
+        # Configurăm subprocess pentru a nu afișa ferestre de consolă pe Windows
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        # Lista cu PID-urile proceselor pe care trebuie să le terminăm
         pids_to_kill = {'Chat': self.chat_pid, 'Viewer': self.viewer_pid}
+        
         for name, pid in pids_to_kill.items():
             if pid:
                 try:
                     print(f"INFO: Se încearcă terminarea procesului {name} (PID: {pid})...")
                     if os.name == 'nt':
-                        os.system(f"taskkill /F /PID {pid}")
+                        # Folosim subprocess.run care este SINCRON (așteaptă finalizarea)
+                        # și suprimăm output-ul pentru o consolă curată.
+                        subprocess.run(
+                            ["taskkill", "/F", "/PID", str(pid)],
+                            check=True, capture_output=True, startupinfo=startupinfo
+                        )
                     else:
-                        os.kill(pid, 9) # SIGKILL
-                    print(f"INFO: Comanda de terminare pentru {name} a fost trimisă.")
+                        os.kill(pid, 9) # SIGKILL pe Linux/macOS este sincron
+                    
+                    print(f"INFO: Procesul {name} (PID: {pid}) a fost terminat.")
+                except subprocess.CalledProcessError:
+                    # Această eroare apare dacă procesul nu mai exista, ceea ce e ok.
+                    print(f"INFO: Procesul {name} (PID: {pid}) era deja închis.")
                 except Exception as e:
-                    print(f"AVERTISMENT: Nu s-a putut termina procesul {name}: {e}")
+                    print(f"AVERTISMENT: Nu s-a putut termina procesul {name} (PID: {pid}): {e}")
         
+        # Restul logicii de închidere rămâne la fel
         if self.tray_icon:
             self.tray_icon.stop()
         
         keyboard.unhook_all()
         print("INFO: Session Manager s-a închis complet.")
-        sys.exit(0)
+        # Folosim os._exit pentru o ieșire mai abruptă, care previne orice agățare a pystray
+        os._exit(0)
 
 if __name__ == '__main__':
     # Logica pentru single-instance a Session Manager-ului însuși
