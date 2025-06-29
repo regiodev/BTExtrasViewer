@@ -472,7 +472,7 @@ class BTViewerApp:
             'tranzactie_acces': self.current_user.get('tranzactie_acces', 'toate')
         }
 
-        TransactionAnalysisReportDialog(self.master, self.db_handler, initial_context)
+        TransactionAnalysisReportDialog(self.master, self.db_handler, initial_context, self.smtp_config)
 
     # =========================================================================
     # METODA MODIFICATĂ PENTRU A CORESPUNDE CU NOUL DB_HANDLER
@@ -542,7 +542,7 @@ class BTViewerApp:
         ttk.Label(account_selector_frame, text="Cont Bancar Activ:", font=(default_font_family, default_font_size, 'bold')).pack(side=tk.LEFT, padx=(0,2))
         self.active_account_color_indicator = tk.Frame(account_selector_frame, width=20, height=20, relief=tk.SUNKEN, borderwidth=1, background="SystemButtonFace")
         self.active_account_color_indicator.pack(side=tk.LEFT, padx=(2, 5), pady=2)
-        self.account_selector_combo = ttk.Combobox(account_selector_frame, textvariable=self.account_combo_var, state="disabled", width=45, font=(default_font_family, default_font_size))
+        self.account_selector_combo = ttk.Combobox(account_selector_frame, textvariable=self.account_combo_var, state="disabled", width=22, font=(default_font_family, default_font_size))
         self.account_selector_combo.pack(side=tk.LEFT, padx=(0,10), fill=tk.X, expand=True)
         self.account_selector_combo.bind("<<ComboboxSelected>>", self._on_account_selected)
 

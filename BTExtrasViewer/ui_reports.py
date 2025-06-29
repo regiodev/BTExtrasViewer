@@ -823,7 +823,6 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
         self.db_handler = db_handler
         self.initial_context = initial_context or {}
         
-        # --- NOU: Salvăm permisiunea de acces la tranzacții și configurația SMTP ---
         self.tranzactie_acces = self.initial_context.get('tranzactie_acces', 'toate')
         self.smtp_config = smtp_config or self.initial_context.get('smtp_config', {})
             
@@ -831,31 +830,38 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
         self.geometry("1100x750")
         self.transient(parent)
 
-        self.start_date_var = tk.StringVar()
-        self.end_date_var = tk.StringVar()
+        # Variabile de control pentru filtre
         self.granularity_var = tk.StringVar(value="Zilnic")
         self.type_var = tk.StringVar(value="Ambele")
         
+        # Atribute interne
         self.report_data = []
-        self.transaction_codes_listbox = None
+        self.transaction_type_vars = {}
+        self.legend_desc_map = {}
         self.results_tree = None
+        self.canvas = None
 
-        self._create_widgets()
-        self._populate_filters_with_initial_context()
-        self._setup_bindings()
-        self.update_idletasks()
-        self._schedule_report_update()
-
+        # Inițializăm sistemul de tooltip
         self.tooltip = tk.Toplevel(self)
         self.tooltip.withdraw()
         self.tooltip.overrideredirect(True)
         self.tooltip_label = ttk.Label(self.tooltip, text="", justify='left',
                                     background='#FFFFE0', relief='solid', borderwidth=1,
-                                    font=(DIALOG_FONT_FAMILY, 9, "bold"))
+                                    font=(DIALOG_FONT_FAMILY, 9))
         self.tooltip_label.pack(ipadx=5, ipady=3)
+        
+        # Construim widget-urile UI
+        self._create_widgets()
 
-        self.canvas.mpl_connect('motion_notify_event', self._on_mouse_hover)
-        self.active_bar = None
+        # Legăm evenimentul de hover DUPĂ ce self.canvas a fost creat
+        if self.canvas:
+            self.canvas.mpl_connect('motion_notify_event', self._on_mouse_hover)
+        
+        # Populăm filtrele și pornim actualizarea
+        self._populate_filters_with_initial_context()
+        self._setup_bindings()
+        self._schedule_report_update()
+
         self.center_window()
         self.grab_set()
 
@@ -871,7 +877,336 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
         position_y = parent_y + (parent_height // 2) - (dialog_height // 2)
         self.geometry(f"+{max(0, position_x)}+{max(0, position_y)}")
 
-    # ==================== METODĂ NOUĂ ====================
+    def _create_widgets(self):
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        main_frame.rowconfigure(2, weight=1) 
+        main_frame.columnconfigure(0, weight=1)
+
+        filter_panel = ttk.LabelFrame(main_frame, text="Filtre și Opțiuni", padding="10")
+        filter_panel.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
+
+        filter_row1 = ttk.Frame(filter_panel)
+        filter_row1.pack(fill="x", expand=True, pady=(0, 10))
+
+        ttk.Label(filter_row1, text="De la:").pack(side="left", padx=(0, 5))
+        self.start_date_entry = DateEntry(filter_row1, date_pattern='yyyy-mm-dd', width=12)
+        self.start_date_entry.pack(side="left", padx=(0, 15))
+
+        ttk.Label(filter_row1, text="Până la:").pack(side="left", padx=(0, 5))
+        self.end_date_entry = DateEntry(filter_row1, date_pattern='yyyy-mm-dd', width=12)
+        self.end_date_entry.pack(side="left", padx=(0, 15))
+
+        ttk.Label(filter_row1, text="Tip Tranzacție:").pack(side="left", padx=(0, 5))
+        self.type_combo = ttk.Combobox(filter_row1, textvariable=self.type_var, values=["Ambele", "Doar Credit", "Doar Debit"], state="readonly", width=12)
+        self.type_combo.pack(side="left", padx=(0, 15))
+
+        ttk.Label(filter_row1, text="Granularitate Listă:").pack(side="left", padx=(0, 5))
+        self.granularity_combo = ttk.Combobox(filter_row1, textvariable=self.granularity_var, values=["Zilnic", "Lunar", "Anual"], state="readonly", width=12)
+        self.granularity_combo.pack(side="left")
+
+        checkbutton_container_frame = ttk.LabelFrame(filter_panel, text="Coduri Tranzacție (Filtru Listă și Grafic)")
+        checkbutton_container_frame.pack(fill="x", pady=5)
+        
+        canvas = tk.Canvas(checkbutton_container_frame, borderwidth=0, background="#ffffff")
+        scrollbar = ttk.Scrollbar(checkbutton_container_frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        
+        self.checkbuttons_frame = ttk.Frame(canvas, padding=5)
+        
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        canvas_frame = canvas.create_window((0, 0), window=self.checkbuttons_frame, anchor="nw")
+        
+        def on_frame_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.config(height=self.checkbuttons_frame.winfo_reqheight())
+        
+        def on_canvas_configure(event):
+            canvas.itemconfig(canvas_frame, width=event.width)
+
+        self.checkbuttons_frame.bind("<Configure>", on_frame_configure)
+        canvas.bind('<Configure>', on_canvas_configure)
+
+        buttons_frame = ttk.Frame(main_frame, padding=(0, 10, 0, 0))
+        buttons_frame.grid(row=1, column=0, sticky="ew", padx=5)
+
+        self.export_excel_button = ttk.Button(buttons_frame, text="Export Excel", command=self.export_to_excel, state="disabled")
+        self.export_excel_button.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.export_pdf_button = ttk.Button(buttons_frame, text="Export PDF", command=self.export_to_pdf, state="disabled")
+        self.export_pdf_button.pack(side=tk.LEFT, padx=5)
+
+        self.send_email_button = ttk.Button(buttons_frame, text="Trimite pe Email", command=self._on_send_email, state="disabled")
+        self.send_email_button.pack(side=tk.LEFT, padx=5)
+        
+        self.notebook = ttk.Notebook(main_frame)
+        self.notebook.grid(row=2, column=0, sticky="nsew", padx=5, pady=(5, 0))
+
+        list_tab = ttk.Frame(self.notebook)
+        self.notebook.add(list_tab, text=" Listă Detaliată ")
+        
+        tree_frame = ttk.Frame(list_tab)
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+        
+        tree_cols = ("perioada", "cod_tranzactie", "tip", "total_suma", "nr_tranzactii")
+        self.results_tree = ttk.Treeview(tree_frame, columns=tree_cols, show="headings")
+        self.results_tree.pack(side="left", fill="both", expand=True)
+        
+        tree_scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.results_tree.yview)
+        tree_scrollbar.pack(side="right", fill="y")
+        self.results_tree.configure(yscrollcommand=tree_scrollbar.set)
+
+        self.results_tree.heading("perioada", text="Perioada")
+        self.results_tree.heading("cod_tranzactie", text="Cod Tranzacție")
+        self.results_tree.heading("tip", text="Tip")
+        self.results_tree.heading("total_suma", text="Sumă Totală")
+        self.results_tree.heading("nr_tranzactii", text="Nr. Tranzacții")
+        
+        self.results_tree.column("perioada", width=120, anchor="w")
+        self.results_tree.column("cod_tranzactie", width=120, anchor="center")
+        self.results_tree.column("tip", width=100, anchor="center")
+        self.results_tree.column("total_suma", width=150, anchor="e")
+        self.results_tree.column("nr_tranzactii", width=100, anchor="center")
+
+        graph_tab = ttk.Frame(self.notebook)
+        self.notebook.add(graph_tab, text=" Grafic Sumar ")
+        
+        self.fig = Figure(figsize=(10, 6), dpi=100)
+        self.ax = self.fig.add_subplot(111)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=graph_tab)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+    def _show_tooltip(self, text, x, y):
+        """Afișează tooltip-ul la coordonatele specificate."""
+        self.tooltip_label.config(text=text)
+        self.tooltip.geometry(f"+{x}+{y}")
+        self.tooltip.deiconify()
+
+    def _hide_tooltip(self, event=None):
+        """Ascunde tooltip-ul."""
+        self.tooltip.withdraw()
+
+    def _schedule_report_update(self, event=None):
+        if hasattr(self, '_update_job'):
+            self.after_cancel(self._update_job)
+        self._update_job = self.after(400, self._refresh_report_data)
+
+    def _setup_bindings(self):
+        self.start_date_entry.bind("<<DateEntrySelected>>", self._schedule_report_update)
+        self.end_date_entry.bind("<<DateEntrySelected>>", self._schedule_report_update)
+        self.granularity_combo.bind("<<ComboboxSelected>>", self._schedule_report_update)
+        self.type_combo.bind("<<ComboboxSelected>>", self._schedule_report_update)
+
+    def _on_mouse_hover(self, event):
+        """Metoda finală și robustă pentru gestionarea tooltip-urilor pe grafic."""
+        found_active_element = False
+        
+        # 1. Verificăm întâi legenda
+        legend = self.ax.get_legend()
+        if legend:
+            # Iterăm prin elementele text ale legendei
+            for legtext in legend.get_texts():
+                # Folosim metoda robustă .contains() a artistului
+                contains, _ = legtext.contains(event)
+                if contains:
+                    short_code = legtext.get_text()
+                    full_description = self.legend_desc_map.get(short_code, "Descriere indisponibilă")
+                    self._show_tooltip(full_description, event.x_root + 15, event.y_root + 10)
+                    found_active_element = True
+                    break # Am găsit, ieșim din bucla legendei
+        
+        # 2. Dacă nu am găsit nimic în legendă, verificăm barele (doar dacă suntem în zona axelor)
+        if not found_active_element and event.inaxes == self.ax:
+            for bar in self.ax.patches:
+                contains, _ = bar.contains(event)
+                if contains:
+                    value = bar.get_height()
+                    currency = self.initial_context.get('currency', 'RON')
+                    tooltip_text = f"{value:,.2f} {currency}".replace(",", "X").replace(".", ",").replace("X", ".")
+                    self._show_tooltip(tooltip_text, event.x_root + 15, event.y_root + 10)
+                    found_active_element = True
+                    break # Am găsit, ieșim din bucla barelor
+
+        # 3. Dacă nu am găsit nimic, ascundem tooltip-ul
+        if not found_active_element:
+            self._hide_tooltip()
+
+    def _populate_filters_with_initial_context(self):
+        """Setează valorile inițiale și creează dinamic Checkbutton-urile."""
+        if not self.initial_context:
+            return
+
+        start_date = self.initial_context.get('start_date')
+        end_date = self.initial_context.get('end_date')
+        if start_date: self.start_date_entry.set_date(start_date)
+        if end_date: self.end_date_entry.set_date(end_date)
+
+        all_transaction_types = self.db_handler.fetch_all_dict(
+            "SELECT cod, descriere_tip FROM tipuri_tranzactii ORDER BY cod ASC"
+        )
+        visible_codes = self.initial_context.get('visible_tx_codes', [])
+        
+        active_account_id = self.initial_context.get('active_account_id')
+        accounts_list = self.initial_context.get('accounts_list', [])
+        active_account = next((acc for acc in accounts_list if acc['id_cont'] == active_account_id), None)
+        if active_account:
+            self.initial_context['account_name'] = active_account.get('nume_cont', 'N/A')
+
+        max_cols = 5
+        row, col = 0, 0
+
+        if all_transaction_types:
+            for type_info in all_transaction_types:
+                code = type_info['cod']
+                description = type_info['descriere_tip']
+                is_active = code in visible_codes
+                var = tk.BooleanVar(value=is_active)
+                
+                cb = ttk.Checkbutton(self.checkbuttons_frame, text=code, variable=var, command=self._schedule_report_update)
+                cb.grid(row=row, column=col, sticky="w", padx=5, pady=2)
+                
+                def on_enter(e, text=description):
+                    self._show_tooltip(text, e.x_root + 10, e.y_root + 20)
+                
+                cb.bind("<Enter>", on_enter)
+                cb.bind("<Leave>", self._hide_tooltip)
+
+                self.transaction_type_vars[code] = var
+                col += 1
+                if col >= max_cols:
+                    col = 0
+                    row += 1
+
+    def _refresh_report_data(self):
+        """Construiește query-ul, preia datele din DB și pregătește totul pentru UI."""
+        try:
+            start_date = self.start_date_entry.get_date()
+            end_date = self.end_date_entry.get_date()
+        except (ValueError, TypeError):
+            messagebox.showerror("Dată Invalidă", "Vă rugăm introduceți un interval de date valid.", parent=self)
+            return
+
+        granularity = self.granularity_var.get()
+        transaction_type_filter = self.type_var.get()
+
+        selected_codes = [code for code, var in self.transaction_type_vars.items() if var.get()]
+        
+        if not selected_codes:
+            self.report_data = []
+            self._populate_treeview()
+            self._update_graph() 
+            self.export_excel_button.config(state="disabled")
+            self.export_pdf_button.config(state="disabled")
+            self.send_email_button.config(state="disabled")
+            return
+
+        if granularity == "Zilnic": select_period_col, group_by_period = "data", "data"
+        elif granularity == "Lunar": select_period_col, group_by_period = "DATE_FORMAT(data, '%Y-%m')", "perioada"
+        else: select_period_col, group_by_period = "YEAR(data)", "perioada"
+
+        sql = f"SELECT {select_period_col} as perioada, cod_tranzactie_fk, tip, SUM(suma) as total_suma, COUNT(*) as nr_tranzactii FROM tranzactii WHERE id_cont_fk = %s AND data BETWEEN %s AND %s"
+        params = [self.initial_context['active_account_id'], start_date, end_date]
+        
+        if self.tranzactie_acces == 'credit':
+            sql += " AND tip = %s"
+            params.append('credit')
+        elif self.tranzactie_acces == 'debit':
+            sql += " AND tip = %s"
+            params.append('debit')
+
+        if transaction_type_filter != "Ambele":
+            sql += " AND tip = %s"
+            params.append('credit' if transaction_type_filter == "Doar Credit" else 'debit')
+
+        placeholders = ', '.join(['%s'] * len(selected_codes))
+        sql += f" AND cod_tranzactie_fk IN ({placeholders})"
+        params.extend(selected_codes)
+        sql += f" GROUP BY {group_by_period}, cod_tranzactie_fk, tip ORDER BY perioada DESC, cod_tranzactie_fk"
+
+        self.report_data = self.db_handler.fetch_all_dict(sql, tuple(params))
+        
+        self._populate_treeview()
+        self._update_graph()
+
+        final_state = "normal" if self.report_data else "disabled"
+        self.export_excel_button.config(state=final_state)
+        self.export_pdf_button.config(state=final_state)
+        self.send_email_button.config(state=final_state)
+
+    def _populate_treeview(self):
+        for item in self.results_tree.get_children():
+            self.results_tree.delete(item)
+
+        self.results_tree.tag_configure('credit', foreground='#006400')
+        self.results_tree.tag_configure('debit', foreground='#8B0000')
+
+        if self.report_data:
+            currency = self.initial_context.get('currency', 'RON')
+            for row in self.report_data:
+                period = row['perioada']
+                if isinstance(period, date):
+                    period = period.strftime('%d-%m-%Y')
+
+                total_suma_str = f"{float(row['total_suma']):,.2f} {currency}".replace(",", "X").replace(".", ",").replace("X", ".")
+                tag = 'credit' if row['tip'] == 'credit' else 'debit'
+                values = (period, row['cod_tranzactie_fk'], row['tip'].capitalize(), total_suma_str, row['nr_tranzactii'])
+                self.results_tree.insert("", "end", values=values, tags=(tag,))
+
+    def _update_graph(self):
+        """Desenează un grafic cu bare stivuite, RESPECTÂND filtrul de tip (D/C)."""
+        self.ax.clear()
+
+        if not self.report_data:
+            self.ax.text(0.5, 0.5, 'Nicio dată de afișat conform filtrelor.', horizontalalignment='center', verticalalignment='center')
+            self.canvas.draw()
+            return
+
+        df = pd.DataFrame(self.report_data)
+        df['total_suma'] = pd.to_numeric(df['total_suma'])
+
+        transaction_type_filter = self.type_var.get()
+        show_credit = transaction_type_filter in ["Ambele", "Doar Credit"]
+        show_debit = transaction_type_filter in ["Ambele", "Doar Debit"]
+
+        pivot_credit = df[df['tip'] == 'credit'].pivot_table(index='perioada', columns='cod_tranzactie_fk', values='total_suma', aggfunc='sum').fillna(0)
+        pivot_debit = df[df['tip'] == 'debit'].pivot_table(index='perioada', columns='cod_tranzactie_fk', values='total_suma', aggfunc='sum').fillna(0)
+
+        all_periods = pivot_credit.index.union(pivot_debit.index)
+        pivot_credit = pivot_credit.reindex(all_periods, fill_value=0)
+        pivot_debit = pivot_debit.reindex(all_periods, fill_value=0)
+
+        bar_width = 0.4 if (show_credit and show_debit and not pivot_credit.empty and not pivot_debit.empty) else 0.8
+
+        if show_debit and not pivot_debit.empty:
+            pos = 0.5 if show_credit and not pivot_credit.empty else 0
+            pivot_debit.plot(kind='bar', stacked=True, ax=self.ax, color=plt.cm.Reds(np.linspace(0.4, 0.8, len(pivot_debit.columns))), width=bar_width, position=pos)
+
+        if show_credit and not pivot_credit.empty:
+            pos = -0.5 if show_debit and not pivot_debit.empty else 0
+            pivot_credit.plot(kind='bar', stacked=True, ax=self.ax, color=plt.cm.Greens(np.linspace(0.4, 0.8, len(pivot_credit.columns))), width=bar_width, position=pos)
+
+        handles, labels = self.ax.get_legend_handles_labels()
+        all_tx_types_info = self.db_handler.fetch_all_dict("SELECT cod, descriere_tip FROM tipuri_tranzactii")
+        self.legend_desc_map = {item['cod']: item['descriere_tip'] for item in all_tx_types_info}
+        
+        self.ax.legend(handles, labels, title='Coduri Tranzacție', bbox_to_anchor=(1.02, 1), loc='upper left', fontsize='small')
+
+        self.ax.set_ylabel('Sumă Totală')
+        self.ax.set_title('Analiză Tranzacții pe Perioadă')
+        self.ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+        formatter = mticker.FuncFormatter(lambda x, pos: f'{x:,.0f}')
+        self.ax.yaxis.set_major_formatter(formatter)
+
+        self.ax.tick_params(axis='x', which='major', labelsize=10)
+        self.ax.set_xticklabels(self.ax.get_xticklabels(), rotation=45, ha='right')
+
+        self.fig.tight_layout(rect=[0, 0, 0.99, 1])
+        self.canvas.draw()
+
     def _generate_pdf_file(self, output_path):
         """Generează un fișier PDF cu graficul și tabelul detaliat."""
         doc = SimpleDocTemplate(output_path, pagesize=A4, rightMargin=inch/2, leftMargin=inch/2, topMargin=inch/2, bottomMargin=inch/2)
@@ -928,7 +1263,6 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
         
         doc.build(story)
 
-    # ==================== METODĂ NOUĂ ====================
     def export_to_pdf(self):
         """Gestionează acțiunea de export în format PDF."""
         if not self.report_data:
@@ -954,7 +1288,6 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
             messagebox.showerror("Eroare Export PDF", f"A apărut o eroare la salvarea fișierului PDF:\n{e}", parent=self)
             logging.error(f"Eroare la export PDF (Analiza Tranzactii): {e}", exc_info=True)
 
-    # ==================== METODĂ NOUĂ ====================
     def export_to_excel(self):
         """Gestionează acțiunea de export în format Excel."""
         if not self.report_data:
@@ -975,18 +1308,17 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
 
         try:
             df = pd.DataFrame(self.report_data)
-            # Conversie tipuri de date și formatare
             df['total_suma'] = pd.to_numeric(df['total_suma'])
-            if 'perioada' in df.columns and pd.api.types.is_datetime64_any_dtype(df['perioada']):
-                df['perioada'] = df['perioada'].dt.strftime('%d.%m.%Y')
+            if 'perioada' in df.columns and pd.api.types.is_string_dtype(df['perioada']):
+                # Nu este necesară conversia dacă e deja string
+                pass
+            elif 'perioada' in df.columns: # Tratează cazul în care e dată
+                 df['perioada'] = pd.to_datetime(df['perioada']).dt.strftime('%d.%m.%Y')
 
-            # Redenumire coloane pentru un aspect mai prietenos
+
             df.rename(columns={
-                'perioada': 'Perioada',
-                'cod_tranzactie_fk': 'Cod Tranzacție',
-                'tip': 'Tip',
-                'total_suma': 'Sumă Totală',
-                'nr_tranzactii': 'Nr. Tranzacții'
+                'perioada': 'Perioada', 'cod_tranzactie_fk': 'Cod Tranzacție',
+                'tip': 'Tip', 'total_suma': 'Sumă Totală', 'nr_tranzactii': 'Nr. Tranzacții'
             }, inplace=True)
 
             with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
@@ -994,43 +1326,30 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
                 df.to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
                 ws = writer.sheets[sheet_name]
                 
-                # Stiluri
                 title_font = ExcelFont(bold=True, size=14, name='Calibri')
                 header_font = ExcelFont(bold=True, color="FFFFFF", name='Calibri', size=11)
                 header_fill = PatternFill(start_color="2C3E50", end_color="2C3E50", fill_type="solid")
                 thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
-                # Titlu
                 start_date_str = self.start_date_entry.get_date().strftime('%d.%m.%Y')
                 end_date_str = self.end_date_entry.get_date().strftime('%d.%m.%Y')
                 title_text = f"Raport Analiză Tranzacții: {self.initial_context.get('account_name', 'N/A')} ({start_date_str} - {end_date_str})"
                 title_cell = ws['A1']
-                title_cell.value = title_text
-                title_cell.font = title_font
+                title_cell.value = title_text; title_cell.font = title_font
                 ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(df.columns))
                 title_cell.alignment = Alignment(horizontal='center')
 
-                # Formatare Header
-                for cell in ws[2]:
-                    cell.font = header_font
-                    cell.fill = header_fill
-                    cell.border = thin_border
+                for cell in ws[2]: cell.font = header_font; cell.fill = header_fill; cell.border = thin_border
                 
-                # Lățime coloane și formatare celule
-                ws.column_dimensions['A'].width = 20 # Perioada
-                ws.column_dimensions['B'].width = 20 # Cod
-                ws.column_dimensions['C'].width = 12 # Tip
-                ws.column_dimensions['D'].width = 20 # Suma
-                ws.column_dimensions['E'].width = 15 # Nr. Tranzactii
+                ws.column_dimensions['A'].width = 20; ws.column_dimensions['B'].width = 20
+                ws.column_dimensions['C'].width = 12; ws.column_dimensions['D'].width = 20
+                ws.column_dimensions['E'].width = 15
 
                 for row_cells in ws.iter_rows(min_row=3, max_row=len(df)+1, min_col=1, max_col=len(df.columns)):
                     for cell in row_cells:
                         cell.border = thin_border
-                        if cell.column == 4: # Suma Totală
-                            cell.number_format = '#,##0.00'
-                            cell.alignment = Alignment(horizontal='right')
+                        if cell.column == 4: cell.number_format = '#,##0.00'; cell.alignment = Alignment(horizontal='right')
                 
-                # Inserare grafic
                 img_buffer = io.BytesIO()
                 self.fig.savefig(img_buffer, format='png', dpi=200, bbox_inches='tight')
                 img = OpenpyxlImage(img_buffer)
@@ -1042,7 +1361,6 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
             messagebox.showerror("Eroare Export Excel", f"A apărut o eroare la salvarea fișierului:\n{e}", parent=self)
             logging.error(f"Eroare la export Excel (Analiza Tranzactii): {e}", exc_info=True)
             
-    # ==================== METODĂ NOUĂ ====================
     def _on_send_email(self):
         """Gestionează acțiunea de trimitere a raportului pe email."""
         if not self.report_data:
@@ -1050,8 +1368,7 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
             return
 
         recipient = simpledialog.askstring("Adresă Destinatar", "Introduceți adresa de email a destinatarului:", parent=self)
-        if not recipient:
-            return
+        if not recipient: return
 
         try:
             account_name = self.initial_context.get('account_name', 'N/A')
@@ -1059,359 +1376,38 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
             end_date_str = self.end_date_entry.get_date().strftime('%d.%m.%Y')
             currency = self.initial_context.get('currency', 'RON')
             
-            # Calculăm totalurile pentru a le include în corpul email-ului
             total_credit = sum(float(r['total_suma']) for r in self.report_data if r['tip'] == 'credit')
             total_debit = sum(float(r['total_suma']) for r in self.report_data if r['tip'] == 'debit')
-            
             f_credit = f"{total_credit:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
             f_debit = f"{total_debit:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-        except Exception as e:
-            messagebox.showerror("Eroare Preluare Date", f"Nu s-au putut prelua datele pentru email: {e}", parent=self)
-            return
+            subject = f"Analiză Tranzacții: {account_name} ({start_date_str} - {end_date_str})"
+            body = f"""Bună ziua,\n\nAtașat găsiți raportul de analiză detaliată a tranzacțiilor generat din {APP_NAME}.\n
+--- REZUMAT RAPORT ---
+Cont Analizat: {account_name}
+Perioada: {start_date_str} - {end_date_str}
+Tip Tranzacții: {self.type_var.get()}
+Granularitate: {self.granularity_var.get()}
+--------------------
+Total Credit pe categorii: {f_credit} {currency}
+Total Debit pe categorii: {f_debit} {currency}
+--------------------\n
+O zi bună,
+Email generat automat de {APP_NAME} v{APP_VERSION}
+"""
 
-        subject = f"Analiză Tranzacții: {account_name} ({start_date_str} - {end_date_str})"
-        body = f"""Bună ziua,
-
-    Atașat găsiți raportul de analiză detaliată a tranzacțiilor generat din {APP_NAME}.
-
-    --- REZUMAT RAPORT ---
-    Cont Analizat: {account_name}
-    Perioada: {start_date_str} - {end_date_str}
-    Tip Tranzacții: {self.type_var.get()}
-    Granularitate: {self.granularity_var.get()}
-    --------------------
-    Total Credit pe categorii: {f_credit} {currency}
-    Total Debit pe categorii: {f_debit} {currency}
-    --------------------
-
-    O zi bună,
-    Email generat automat de {APP_NAME} v{APP_VERSION}
-    """
-
-        temp_dir = tempfile.gettempdir()
-        temp_pdf_path = os.path.join(temp_dir, f"Analiza_Tranzactii_{account_name.replace(' ', '_')}_{date.today().strftime('%Y%m%d')}.pdf")
+            temp_dir = tempfile.gettempdir()
+            temp_pdf_path = os.path.join(temp_dir, f"Analiza_Tranzactii_{account_name.replace(' ', '_')}_{date.today().strftime('%Y%m%d')}.pdf")
         
-        try:
             self._generate_pdf_file(temp_pdf_path)
             success, message = send_report_email(self.smtp_config, recipient, subject, body, temp_pdf_path)
 
-            if success:
-                messagebox.showinfo("Succes", message, parent=self)
-            else:
-                messagebox.showerror("Eroare Trimitere", message, parent=self)
+            if success: messagebox.showinfo("Succes", message, parent=self)
+            else: messagebox.showerror("Eroare Trimitere", message, parent=self)
         except Exception as e:
-            messagebox.showerror("Eroare Generare PDF", f"Nu s-a putut genera fișierul PDF pentru atașare:\n{e}", parent=self)
-            logging.error(f"Eroare la generare PDF pentru email (Analiza Tranzactii): {e}", exc_info=True)
+            messagebox.showerror("Eroare Critică", f"A apărut o eroare neașteptată:\n{e}", parent=self)
+            logging.error(f"Eroare la trimitere email (Analiza Tranzactii): {e}", exc_info=True)
         finally:
             if os.path.exists(temp_pdf_path):
-                try:
-                    os.remove(temp_pdf_path)
-                except OSError as e:
-                    logging.warning(f"Nu s-a putut șterge fișierul PDF temporar: {temp_pdf_path}. Eroare: {e}")
-
-    def _create_widgets(self):
-        main_frame = ttk.Frame(self, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        # Am modificat rowconfigure pentru a face loc butoanelor de jos
-        main_frame.rowconfigure(2, weight=1) 
-        main_frame.columnconfigure(0, weight=1)
-
-        # --- Panoul de Filtre (partea de sus) ---
-        filter_panel = ttk.LabelFrame(main_frame, text="Filtre și Opțiuni", padding="10")
-        # Am schimbat grid row
-        filter_panel.grid(row=0, column=0, sticky="ew", padx=5, pady=5)
-
-        filter_row1 = ttk.Frame(filter_panel)
-        filter_row1.pack(fill="x", expand=True, pady=(0, 10))
-
-        ttk.Label(filter_row1, text="De la:").pack(side="left", padx=(0, 5))
-        self.start_date_entry = DateEntry(filter_row1, date_pattern='yyyy-mm-dd', width=12)
-        self.start_date_entry.pack(side="left", padx=(0, 15))
-
-        ttk.Label(filter_row1, text="Până la:").pack(side="left", padx=(0, 5))
-        self.end_date_entry = DateEntry(filter_row1, date_pattern='yyyy-mm-dd', width=12)
-        self.end_date_entry.pack(side="left", padx=(0, 15))
-
-        ttk.Label(filter_row1, text="Tip Tranzacție:").pack(side="left", padx=(0, 5))
-        self.type_combo = ttk.Combobox(filter_row1, textvariable=self.type_var, values=["Ambele", "Doar Credit", "Doar Debit"], state="readonly", width=12)
-        self.type_combo.pack(side="left", padx=(0, 15))
-
-        ttk.Label(filter_row1, text="Granularitate Listă:").pack(side="left", padx=(0, 5))
-        self.granularity_combo = ttk.Combobox(filter_row1, textvariable=self.granularity_var, values=["Zilnic", "Lunar", "Anual"], state="readonly", width=12)
-        self.granularity_combo.pack(side="left")
-
-        checkbutton_container_frame = ttk.LabelFrame(filter_panel, text="Coduri Tranzacție (Filtru Listă și Grafic)")
-        checkbutton_container_frame.pack(fill="x", expand=True, pady=5)
-
-        self.checkbuttons_frame = ttk.Frame(checkbutton_container_frame, padding=5)
-        self.checkbuttons_frame.pack(fill="both", expand=True)
-
-        self.transaction_type_vars = {}
-
-        # ==================== BLOC NOU DE BUTOANE ====================
-        buttons_frame = ttk.Frame(main_frame, padding=(0, 10, 0, 0))
-        buttons_frame.grid(row=1, column=0, sticky="ew", padx=5)
-
-        self.export_excel_button = ttk.Button(buttons_frame, text="Export Excel", command=self.export_to_excel, state="disabled")
-        self.export_excel_button.pack(side=tk.LEFT, padx=(0, 5))
-        
-        self.export_pdf_button = ttk.Button(buttons_frame, text="Export PDF", command=self.export_to_pdf, state="disabled")
-        self.export_pdf_button.pack(side=tk.LEFT, padx=5)
-
-        self.send_email_button = ttk.Button(buttons_frame, text="Trimite pe Email", command=self._on_send_email, state="disabled")
-        self.send_email_button.pack(side=tk.LEFT, padx=5)
-        # =============================================================
-
-        # --- Notebook cu Tab-uri ---
-        self.notebook = ttk.Notebook(main_frame)
-        # Am schimbat grid row
-        self.notebook.grid(row=2, column=0, sticky="nsew", padx=5, pady=(5, 0))
-
-        # Tab 1: Listă Detaliată
-        list_tab = ttk.Frame(self.notebook)
-        self.notebook.add(list_tab, text=" Listă Detaliată ")
-        
-        tree_frame = ttk.Frame(list_tab)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
-        
-        tree_cols = ("perioada", "cod_tranzactie", "tip", "total_suma", "nr_tranzactii")
-        self.results_tree = ttk.Treeview(tree_frame, columns=tree_cols, show="headings")
-        self.results_tree.pack(side="left", fill="both", expand=True)
-        
-        tree_scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.results_tree.yview)
-        tree_scrollbar.pack(side="right", fill="y")
-        self.results_tree.configure(yscrollcommand=tree_scrollbar.set)
-
-        self.results_tree.heading("perioada", text="Perioada")
-        self.results_tree.heading("cod_tranzactie", text="Cod Tranzacție")
-        self.results_tree.heading("tip", text="Tip")
-        self.results_tree.heading("total_suma", text="Sumă Totală")
-        self.results_tree.heading("nr_tranzactii", text="Nr. Tranzacții")
-        
-        self.results_tree.column("perioada", width=120, anchor="w")
-        self.results_tree.column("cod_tranzactie", width=120, anchor="center")
-        self.results_tree.column("tip", width=100, anchor="center")
-        self.results_tree.column("total_suma", width=150, anchor="e")
-        self.results_tree.column("nr_tranzactii", width=100, anchor="center")
-
-        # Tab 2: Grafic Sumar
-        graph_tab = ttk.Frame(self.notebook)
-        self.notebook.add(graph_tab, text=" Grafic Sumar ")
-        
-        self.fig = Figure(figsize=(10, 6), dpi=100)
-        self.ax = self.fig.add_subplot(111)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=graph_tab)
-        self.canvas.draw()
-        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-    def _populate_filters_with_initial_context(self):
-        """Setează valorile inițiale și creează dinamic Checkbutton-urile."""
-        if not self.initial_context:
-            return
-
-        start_date = self.initial_context.get('start_date')
-        end_date = self.initial_context.get('end_date')
-        if start_date: self.start_date_entry.set_date(start_date)
-        if end_date: self.end_date_entry.set_date(end_date)
-
-        all_transaction_types = self.db_handler.fetch_all_dict(
-            "SELECT cod, descriere_tip FROM tipuri_tranzactii ORDER BY cod ASC"
-        )
-        visible_codes = self.initial_context.get('visible_tx_codes', [])
-        
-        # Stocăm numele contului pentru a-l folosi în titlurile de export
-        active_account_id = self.initial_context.get('active_account_id')
-        accounts_list = self.initial_context.get('accounts_list', [])
-        active_account = next((acc for acc in accounts_list if acc['id_cont'] == active_account_id), None)
-        if active_account:
-            self.initial_context['account_name'] = active_account.get('nume_cont', 'N/A')
-
-        max_cols = 4
-        row, col = 0, 0
-
-        if all_transaction_types:
-            for type_info in all_transaction_types:
-                code = type_info['cod']
-                description = type_info['descriere_tip']
-                is_active = code in visible_codes
-                var = tk.BooleanVar(value=is_active)
-                cb = ttk.Checkbutton(self.checkbuttons_frame, text=description, variable=var, command=self._schedule_report_update)
-                cb.grid(row=row, column=col, sticky="w", padx=5, pady=2)
-                self.transaction_type_vars[code] = var
-                col += 1
-                if col >= max_cols:
-                    col = 0
-                    row += 1
-
-    def _schedule_report_update(self, event=None):
-        if hasattr(self, '_update_job'):
-            self.after_cancel(self._update_job)
-        self._update_job = self.after(400, self._refresh_report_data)
-
-    def _setup_bindings(self):
-        self.start_date_entry.bind("<<DateEntrySelected>>", self._schedule_report_update)
-        self.end_date_entry.bind("<<DateEntrySelected>>", self._schedule_report_update)
-        self.granularity_combo.bind("<<ComboboxSelected>>", self._schedule_report_update)
-        self.type_combo.bind("<<ComboboxSelected>>", self._schedule_report_update)
-
-    def _refresh_report_data(self):
-        """Construiește query-ul, preia datele din DB și pregătește totul pentru UI."""
-        start_date = self.start_date_entry.get_date()
-        end_date = self.end_date_entry.get_date()
-        granularity = self.granularity_var.get()
-        transaction_type_filter = self.type_var.get() # Filtrul din UI-ul raportului
-
-        selected_codes = [code for code, var in self.transaction_type_vars.items() if var.get()]
-        
-        if not selected_codes:
-            self.report_data = []
-            self._populate_treeview()
-            self._update_graph() 
-            self.export_excel_button.config(state="disabled")
-            self.export_pdf_button.config(state="disabled")
-            self.send_email_button.config(state="disabled")
-            return
-
-        if granularity == "Zilnic": select_period_col, group_by_period = "data", "data"
-        elif granularity == "Lunar": select_period_col, group_by_period = "DATE_FORMAT(data, '%Y-%m')", "perioada"
-        else: select_period_col, group_by_period = "YEAR(data)", "perioada"
-
-        sql = f"SELECT {select_period_col} as perioada, cod_tranzactie_fk, tip, SUM(suma) as total_suma, COUNT(*) as nr_tranzactii FROM tranzactii WHERE id_cont_fk = %s AND data BETWEEN %s AND %s"
-        params = [self.initial_context['active_account_id'], start_date, end_date]
-        
-        # --- NOU: Aplicăm filtrul de acces al utilizatorului ---
-        if self.tranzactie_acces == 'credit':
-            sql += " AND tip = %s"
-            params.append('credit')
-        elif self.tranzactie_acces == 'debit':
-            sql += " AND tip = %s"
-            params.append('debit')
-
-        # Aplicăm și filtrul din UI-ul raportului
-        if transaction_type_filter != "Ambele":
-            sql += " AND tip = %s"
-            params.append('credit' if transaction_type_filter == "Doar Credit" else 'debit')
-
-        placeholders = ', '.join(['%s'] * len(selected_codes))
-        sql += f" AND cod_tranzactie_fk IN ({placeholders})"
-        params.extend(selected_codes)
-        sql += f" GROUP BY {group_by_period}, cod_tranzactie_fk, tip ORDER BY perioada DESC, cod_tranzactie_fk"
-
-        self.report_data = self.db_handler.fetch_all_dict(sql, tuple(params))
-        
-        self._populate_treeview()
-        self._update_graph()
-
-        final_state = "normal" if self.report_data else "disabled"
-        self.export_excel_button.config(state=final_state)
-        self.export_pdf_button.config(state=final_state)
-        self.send_email_button.config(state=final_state)
-
-    def _update_graph(self):
-        """Desenează un grafic cu bare stivuite, RESPECTÂND filtrul de tip (D/C)."""
-        self.ax.clear()
-
-        if not self.report_data:
-            self.ax.text(0.5, 0.5, 'Nicio dată de afișat conform filtrelor.', horizontalalignment='center', verticalalignment='center')
-            self.canvas.draw()
-            return
-
-        df = pd.DataFrame(self.report_data)
-        df['total_suma'] = pd.to_numeric(df['total_suma'])
-
-        transaction_type_filter = self.type_var.get()
-        show_credit = transaction_type_filter in ["Ambele", "Doar Credit"]
-        show_debit = transaction_type_filter in ["Ambele", "Doar Debit"]
-
-        pivot_credit = df[df['tip'] == 'credit'].pivot_table(index='perioada', columns='cod_tranzactie_fk', values='total_suma', aggfunc='sum').fillna(0)
-        pivot_debit = df[df['tip'] == 'debit'].pivot_table(index='perioada', columns='cod_tranzactie_fk', values='total_suma', aggfunc='sum').fillna(0)
-
-        all_periods = pivot_credit.index.union(pivot_debit.index)
-        pivot_credit = pivot_credit.reindex(all_periods, fill_value=0)
-        pivot_debit = pivot_debit.reindex(all_periods, fill_value=0)
-
-        bar_width = 0.4 if (show_credit and show_debit and not pivot_credit.empty and not pivot_debit.empty) else 0.8
-
-        if show_debit and not pivot_debit.empty:
-            pos = 0.5 if show_credit and not pivot_credit.empty else 0
-            pivot_debit.plot(kind='bar', stacked=True, ax=self.ax, color=plt.cm.Reds(np.linspace(0.4, 0.8, len(pivot_debit.columns))), width=bar_width, position=pos)
-
-        if show_credit and not pivot_credit.empty:
-            pos = -0.5 if show_debit and not pivot_debit.empty else 0
-            pivot_credit.plot(kind='bar', stacked=True, ax=self.ax, color=plt.cm.Greens(np.linspace(0.4, 0.8, len(pivot_credit.columns))), width=bar_width, position=pos)
-
-        # Formatare grafic
-        handles, labels = self.ax.get_legend_handles_labels()
-        all_tx_types_info = self.db_handler.fetch_all_dict("SELECT cod, descriere_tip FROM tipuri_tranzactii")
-        desc_map = {item['cod']: item['descriere_tip'] for item in all_tx_types_info}
-        new_labels = [desc_map.get(label, label) for label in labels]
-        self.ax.legend(handles, new_labels, title='Coduri Tranzacție', bbox_to_anchor=(1.02, 1), loc='upper left')
-
-        self.ax.set_ylabel('Sumă Totală')
-        self.ax.set_title('Analiză Tranzacții pe Perioadă')
-        self.ax.grid(axis='y', linestyle='--', alpha=0.7)
-
-        formatter = mticker.FuncFormatter(lambda x, pos: f'{x:,.0f}')
-        self.ax.yaxis.set_major_formatter(formatter)
-
-        # === BLOC DE COD CORECTAT ===
-        # Am eliminat parametrii problematici din `tick_params` și i-am pus aici.
-        # Aceasta este metoda corectă de a roti etichetele după ce au fost desenate de pandas.
-        self.ax.tick_params(axis='x', which='major', labelsize=10)
-        self.ax.set_xticklabels(self.ax.get_xticklabels(), rotation=45, ha='right')
-        # ============================
-
-        self.fig.tight_layout(rect=[0, 0, 0.85, 1])
-        self.canvas.draw()
-
-    def _on_mouse_hover(self, event):
-        if event.inaxes != self.ax:
-            if self.active_bar:
-                self.tooltip.withdraw()
-                self.active_bar = None
-            return
-
-        found_bar = None
-        for bar in self.ax.patches:
-            contains, _ = bar.contains(event)
-            if contains:
-                found_bar = bar
-                break
-
-        if found_bar:
-            if found_bar != self.active_bar:
-                self.active_bar = found_bar
-                value = found_bar.get_height()
-                currency = self.initial_context.get('currency', 'RON')
-                tooltip_text = f"{value:,.2f} {currency}".replace(",", "X").replace(".", ",").replace("X", ".")
-                self.tooltip_label.config(text=tooltip_text)
-                
-                x_pos = self.canvas.get_tk_widget().winfo_pointerx() + 15
-                y_pos = self.canvas.get_tk_widget().winfo_pointery() + 10
-
-                self.tooltip.geometry(f"+{x_pos}+{y_pos}")
-                self.tooltip.deiconify()
-        else:
-            if self.active_bar:
-                self.tooltip.withdraw()
-                self.active_bar = None
-
-    def _populate_treeview(self):
-        for item in self.results_tree.get_children():
-            self.results_tree.delete(item)
-
-        self.results_tree.tag_configure('credit', foreground='#006400')
-        self.results_tree.tag_configure('debit', foreground='#8B0000')
-
-        if self.report_data:
-            currency = self.initial_context.get('currency', 'RON')
-            for row in self.report_data:
-                period = row['perioada']
-                if isinstance(period, date):
-                    period = period.strftime('%d-%m-%Y')
-
-                total_suma_str = f"{float(row['total_suma']):,.2f} {currency}".replace(",", "X").replace(".", ",").replace("X", ".")
-                tag = 'credit' if row['tip'] == 'credit' else 'debit'
-                values = (period, row['cod_tranzactie_fk'], row['tip'].capitalize(), total_suma_str, row['nr_tranzactii'])
-                self.results_tree.insert("", "end", values=values, tags=(tag,))
+                try: os.remove(temp_pdf_path)
+                except OSError as e: logging.warning(f"Nu s-a putut șterge fișierul PDF temporar: {temp_pdf_path}. Eroare: {e}")
