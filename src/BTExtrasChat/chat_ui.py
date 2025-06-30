@@ -6,7 +6,8 @@ import threading
 import queue
 import time
 from datetime import datetime, timedelta
-import mysql.connector
+import pymysql
+from pymysql.cursors import DictCursor
 import os
 import socket
 import sys
@@ -113,7 +114,11 @@ class ChatWindow:
         """Rulează în fundal, caută mesaje noi și trimite heartbeat."""
         polling_conn = None
         try:
-            polling_conn = mysql.connector.connect(**self.db_creds)
+            # --- BLOC MODIFICAT PENTRU PyMySQL ---
+            creds = self.db_creds.copy()
+            creds['db'] = creds.pop('database')
+            creds['passwd'] = creds.pop('password')
+            polling_conn = pymysql.connect(**creds, charset='utf8mb4', cursorclass=DictCursor)
             
             while self.is_running:
                 cursor = None
@@ -153,10 +158,10 @@ class ChatWindow:
                         for msg in new_messages:
                             self.message_queue.put(msg)
 
-                except mysql.connector.Error as db_err:
+                except pymysql.Error as db_err:
                     print(f"Eroare DB în bucla de polling: {db_err}.")
                     time.sleep(10)
-                    if not (polling_conn and polling_conn.is_connected()):
+                    if not (polling_conn and polling_conn.open):
                         polling_conn = mysql.connector.connect(**self.db_creds)
                 finally:
                     if cursor:

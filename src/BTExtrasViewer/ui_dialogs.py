@@ -5,9 +5,9 @@ from .email_handler import test_smtp_connection
 from datetime import date
 from tkcalendar import DateEntry
 # Modulele de bază sunt importate din 'common'
-from common import config_management
-from common import auth_handler
-import mysql.connector
+from common.config_management import save_app_config
+from common import auth_handler # Acesta poate rămâne așa sau poate fi schimbat, dar îl lăsăm momentan pentru simplitate
+import pymysql
 import logging
 import re
 
@@ -257,7 +257,7 @@ class AccountEditDialog(simpledialog.Dialog):
             if self.db_handler.fetch_scalar(query_name, tuple(params_name)):
                 messagebox.showwarning("Validare Eșuată", "Un cont cu acest nume există deja.", parent=self)
                 return False
-        except mysql.connector.Error as e:
+        except pymysql.Error as e:
             messagebox.showerror("Eroare DB", f"Eroare la verificarea numelui contului: {e}", parent=self)
             return False
         if iban:
@@ -270,7 +270,7 @@ class AccountEditDialog(simpledialog.Dialog):
                 if self.db_handler.fetch_scalar(query_iban, tuple(params_iban)):
                     messagebox.showwarning("Validare Eșuată", "Un cont cu acest IBAN există deja.", parent=self)
                     return False
-            except mysql.connector.Error as e:
+            except pymysql.Error as e:
                 messagebox.showerror("Eroare DB", f"Eroare la verificarea IBAN-ului: {e}", parent=self)
                 return False
         return True
@@ -382,7 +382,7 @@ class AccountManagerDialog(simpledialog.Dialog):
                 if self.db_handler.execute_commit("DELETE FROM conturi_bancare WHERE id_cont = %s", (self.selected_account_id,)):
                     messagebox.showinfo("Succes", "Contul a fost șters.", parent=self)
                     self.load_accounts()
-            except mysql.connector.Error as e_db:
+            except pymysql.Error as e_db:
                  messagebox.showerror("Eroare Ștergere DB", f"Nu s-a putut șterge contul:\n{e_db.msg}", parent=self)
             except Exception as e:
                 messagebox.showerror("Eroare Ștergere", f"Eroare: {e}", parent=self)
@@ -476,7 +476,7 @@ class TransactionTypeManagerDialog(simpledialog.Dialog):
         self.visibility_settings[cod_key] = not current_visibility
         
         # MODIFICARE: Salvăm întregul bloc de setări în DB prin funcția centralizată
-        config_management.save_app_config(self.app_instance)
+        save_app_config(self.app_instance)
         
         self.load_transaction_types()
 
@@ -855,7 +855,7 @@ class UserEditDialog(simpledialog.Dialog):
             self.db_handler.conn.commit()
             self.result = True
 
-        except mysql.connector.Error as e:
+        except pymysql.Error as e:
             # Anularea tranzacției în caz de eroare
             self.db_handler.conn.rollback()
             messagebox.showerror("Eroare Bază de Date", f"Nu s-a putut salva utilizatorul:\n{e.msg}", parent=self)

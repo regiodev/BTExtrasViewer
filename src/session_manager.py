@@ -10,9 +10,6 @@ from PIL import Image
 import pystray
 import keyboard
 
-# Adăugăm calea rădăcină
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__))))
-
 from common.app_constants import (
     GLOBAL_HOTKEY_CHAT, CHAT_COMMAND_PORT, 
     VIEWER_COMMAND_PORT, GLOBAL_HOTKEY_VIEWER,

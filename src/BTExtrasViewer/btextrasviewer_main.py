@@ -18,6 +18,7 @@ import json
 import base64
 import argparse
 import time
+
 from common.app_constants import CHAT_COMMAND_PORT, VIEWER_COMMAND_PORT, SESSION_COMMAND_PORT
 
 
@@ -27,16 +28,16 @@ from common.app_constants import (
     MONTH_MAP_FOR_NAV, REVERSE_MONTH_MAP_FOR_NAV, CHAT_COMMAND_PORT,
     VIEWER_COMMAND_PORT, SESSION_COMMAND_PORT
 )
-from common import config_management # <-- MODIFICARE CHEIE AICI
+from common.config_management import save_app_config, save_db_credentials
 from common.db_handler import DatabaseHandler, MariaDBConfigDialog
 from common import auth_handler
 
-# Importurile din pachetul local BTExtrasViewer (folosind importuri relative)
-from .ui_reports import CashFlowReportDialog, BalanceEvolutionReportDialog, TransactionAnalysisReportDialog
-from . import file_processing
-from .file_processing import extract_iban_from_mt940, threaded_import_worker, threaded_export_worker
-from . import ui_utils
-from .ui_dialogs import (
+# Importurile din pachetul local BTExtrasViewer (folosind importuri absolute)
+from BTExtrasViewer.ui_reports import CashFlowReportDialog, BalanceEvolutionReportDialog, TransactionAnalysisReportDialog
+from BTExtrasViewer import file_processing
+from BTExtrasViewer.file_processing import extract_iban_from_mt940, threaded_import_worker, threaded_export_worker
+from BTExtrasViewer import ui_utils
+from BTExtrasViewer.ui_dialogs import (
     AccountManagerDialog, AccountEditDialog, TransactionTypeManagerDialog, 
     SMTPConfigDialog, BalanceReportConfigDialog, LoginDialog, 
     UserManagerDialog, RoleManagerDialog, SwiftCodeManagerDialog, CurrencyManagerDialog,
@@ -331,7 +332,7 @@ class BTViewerApp:
         dialog = SMTPConfigDialog(self.master, initial_config=self.smtp_config)
         if dialog.result:
             self.smtp_config = dialog.result
-            config_management.save_app_config(self)
+            save_app_config(self)
             messagebox.showinfo("Configurare SMTP", "Setările SMTP au fost salvate.", parent=self.master)
 
     def manage_transaction_types(self):
@@ -2362,7 +2363,7 @@ if __name__ == "__main__":
             creds = dialog_db.result
             if creds and all(creds.values()):
                 db_handler_main.db_credentials = creds
-                config_management.save_db_credentials(creds)
+                save_db_credentials(creds)
                 if not db_handler_main.connect():
                     raise ConnectionError("Eroare reconectare DB.")
             else: raise ConnectionError("Configurare DB anulată.")
@@ -2388,7 +2389,7 @@ if __name__ == "__main__":
         root = tk.Tk()
         try:
             base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-            icon_path = os.path.join(base_path, '..', 'assets', 'BT_logo.ico')
+            icon_path = os.path.join(base_path, 'assets', 'BT_logo.ico')
             if os.path.exists(icon_path): root.iconbitmap(icon_path)
         except Exception as e:
             logging.error(f"Nu s-a putut seta iconul: {e}")

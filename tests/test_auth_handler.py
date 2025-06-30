@@ -7,7 +7,7 @@ import os
 # și să importe module din pachetul 'common' și din restul aplicației.
 # El adaugă directorul rădăcină al proiectului (cel de deasupra lui 'tests')
 # în calea de căutare a modulelor Python.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../src')))
 
 from common import auth_handler
 

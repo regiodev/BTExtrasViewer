@@ -10,9 +10,9 @@ from tkinter import messagebox
 import configparser
 import threading
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-from common import config_management, db_handler
+# Linii CORECTATE și standardizate
+from common.config_management import read_db_config_from_parser, save_db_credentials
+from common.db_handler import DatabaseHandler, MariaDBConfigDialog
 from common.app_constants import CHAT_COMMAND_PORT
 from BTExtrasViewer.ui_dialogs import LoginDialog, ForcePasswordChangeDialog
 from BTExtrasChat.chat_ui import ChatWindow
@@ -51,7 +51,7 @@ def main():
             creds = dialog.result
             if creds and all(creds.values()):
                 database.db_credentials = creds
-                config_management.save_db_credentials(creds)
+                save_db_credentials(creds)
                 if not database.connect(): raise ConnectionError("Eroare reconectare DB.")
             else: raise ConnectionError("Configurare DB anulată.")
 

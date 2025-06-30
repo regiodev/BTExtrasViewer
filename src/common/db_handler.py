@@ -1,6 +1,6 @@
 # db_handler.py
-import mysql.connector
-from mysql.connector import errorcode
+import pymysql
+from pymysql.cursors import DictCursor
 import logging
 import tkinter as tk
 from tkinter import simpledialog, messagebox
@@ -323,7 +323,7 @@ class DatabaseHandler:
                 self.conn.commit()
                 logging.info(f"{len(swift_data)} înregistrări SWIFT standard au fost inserate.")
 
-        except mysql.connector.Error as err:
+        except pymysql.Error as err:
             logging.error(f"Eroare la popularea tabelei swift_code_descriptions: {err.msg}")
             self.conn.rollback()
 
@@ -333,10 +333,19 @@ class DatabaseHandler:
             logging.error("Credentiale DB lipsesc. Conectare eșuată.")
             return False
         try:
-            self.conn = mysql.connector.connect(**self.db_credentials, autocommit=False)
+            creds = self.db_credentials.copy()
+            # PyMySQL folosește 'db' în loc de 'database' și 'passwd' în loc de 'password'
+            creds['db'] = creds.pop('database')
+            creds['passwd'] = creds.pop('password')
+            
+            self.conn = pymysql.connect(
+                **creds,
+                charset='utf8mb4',
+                cursorclass=DictCursor  # Asigură că rezultatele sunt dicționare, ca înainte
+            )
             logging.info(f"Conectat cu succes la DB '{self.db_credentials.get('database')}' pe host '{self.db_credentials.get('host')}'.")
             return True
-        except mysql.connector.Error as err:
+        except pymysql.Error as err:
             logging.error(f"Eroare conectare la MariaDB: {err}")
             self.conn = None
             if self.app_master_ref:
@@ -349,7 +358,8 @@ class DatabaseHandler:
             logging.info("Conexiune la baza de date închisă.")
 
     def is_connected(self):
-        return self.conn is not None and self.conn.is_connected()
+    # PyMySQL folosește atributul .open pentru a verifica starea conexiunii
+    return self.conn is not None and self.conn.open
 
     def check_and_setup_database_schema(self):
         """
@@ -403,7 +413,7 @@ class DatabaseHandler:
             
             logging.info("Schema DB este validă și actualizată.")
             return True
-        except mysql.connector.Error as err:
+        except pymysql.Error as err:
             logging.error(f"Eroare la verificarea/crearea schemei DB: {err}")
             self.conn.rollback() 
             messagebox.showerror("Eroare Bază de Date", f"A apărut o problemă la verificarea structurii bazei de date:\n{err}", parent=self.app_master_ref)
@@ -459,7 +469,7 @@ class DatabaseHandler:
                 logging.warning(f"Utilizator 'admin' creat cu parola temporară: '{admin_pass}'")
                 if self.app_master_ref:
                     messagebox.showinfo("Utilizator Implicit Creat", f"A fost creat un cont de administrator:\n\nUtilizator: {admin_user}\nParolă: {admin_pass}", parent=self.app_master_ref)
-        except mysql.connector.Error as err:
+        except pymysql.Error as err:
             logging.error(f"Eroare la inserarea datelor inițiale (seed): {err.msg}")
             self.conn.rollback()
 
@@ -469,7 +479,7 @@ class DatabaseHandler:
             with self.conn.cursor(dictionary=True) as cursor:
                 cursor.execute(query, params or ())
                 return cursor.fetchall()
-        except mysql.connector.Error as e:
+        except pymysql.Error as e:
             logging.error(f"Eroare SQL la fetch_all_dict: {e.msg}")
             return []
 
@@ -479,7 +489,7 @@ class DatabaseHandler:
             with self.conn.cursor(dictionary=True) as cursor:
                 cursor.execute(query, params or ())
                 return cursor.fetchone()
-        except mysql.connector.Error as e:
+        except pymysql.Error as e:
             logging.error(f"Eroare SQL la fetch_one_dict: {e.msg}")
             return None
 
@@ -577,7 +587,7 @@ class DatabaseHandler:
                 cursor.execute(query, params or ())
                 result = cursor.fetchone()
             return result[0] if result and len(result) > 0 else None
-        except mysql.connector.Error as e:
+        except pymysql.Error as e:
             logging.error(f"Eroare SQL la fetch_scalar: {e.msg}")
             return None
 
@@ -588,7 +598,7 @@ class DatabaseHandler:
                 cursor.execute(query, params or ())
             self.conn.commit()
             return True
-        except mysql.connector.Error as e:
+        except pymysql.Error as e:
             logging.error(f"EROARE SQL în execute_commit: {e.msg}")
             self.conn.rollback() # Anulăm tranzacția în caz de eroare
             if self.app_master_ref:
@@ -610,7 +620,7 @@ class DatabaseHandler:
                 return True, "Valuta a fost adăugată."
             else:
                 return False, "Eroare la adăugarea valutei."
-        except mysql.connector.Error as e:
+        except pymysql.Error as e:
             if e.errno == errorcode.ER_DUP_ENTRY:
                 return False, "Această valută există deja."
             return False, f"Eroare DB: {e.msg}"
@@ -648,7 +658,7 @@ class DatabaseHandler:
                 self.conn.commit()
                 logging.info(f"{len(valute_standard)} valute standard au fost inserate.")
 
-        except mysql.connector.Error as err:
+        except pymysql.Error as err:
             logging.error(f"Eroare la popularea tabelei valute: {err.msg}")
             self.conn.rollback()
 
@@ -748,7 +758,7 @@ class DatabaseHandler:
                 return True, "Rolul a fost adăugat cu succes."
             else:
                 return False, "Eroare la adăugarea rolului."
-        except mysql.connector.Error as e:
+        except pymysql.Error as e:
             if e.errno == errorcode.ER_DUP_ENTRY:
                 return False, "Un rol cu acest nume există deja."
             return False, f"Eroare DB: {e.msg}"
@@ -765,7 +775,7 @@ class DatabaseHandler:
                 return True, "Rolul a fost redenumit."
             else:
                 return False, "Eroare la redenumirea rolului."
-        except mysql.connector.Error as e:
+        except pymysql.Error as e:
             if e.errno == errorcode.ER_DUP_ENTRY:
                 return False, "Un rol cu acest nume există deja."
             return False, f"Eroare DB: {e.msg}"
@@ -819,7 +829,7 @@ class DatabaseHandler:
             # Finalizăm tranzacția prin commit
             self.conn.commit()
             return True
-        except mysql.connector.Error as e:
+        except pymysql.Error as e:
             logging.error(f"Eroare la salvarea permisiunilor pentru rolul {role_id}: {e}")
             self.conn.rollback() # Anulăm orice modificare în caz de eroare
             return False
@@ -879,7 +889,7 @@ class DatabaseHandler:
                  return True, "Starea utilizatorului a fost actualizată."
             else:
                  return False, "Eroare la actualizarea stării."
-        except mysql.connector.Error as e:
+        except pymysql.Error as e:
             logging.error(f"Eroare la schimbarea stării utilizatorului ID {user_id}: {e}")
             return False, f"Eroare DB: {e.msg}"
         

@@ -11,7 +11,7 @@ from openpyxl.utils import get_column_letter
 import threading
 from queue import Queue, Empty # Queue este folosit, Empty nu neapărat direct de utilizator
 from datetime import datetime
-import mysql.connector
+import pymysql
 from sqlalchemy import create_engine
 
 # Expresii regulate
@@ -104,8 +104,6 @@ def create_progress_window(master_ref, title, message):
 
     return progress_win, progress_bar_widget, progress_status_label_widget
 
-# Înlocuiți această funcție în file_processing.py
-
 def threaded_import_worker(app_instance, file_paths, q_ref, active_account_id_for_import):
     logging.debug(f"DEBUG_THREAD: Pornit threaded_import_worker. Cont țintă ID: {active_account_id_for_import}")
     inserted, ignored = 0, 0
@@ -114,21 +112,23 @@ def threaded_import_worker(app_instance, file_paths, q_ref, active_account_id_fo
         if active_account_id_for_import is None:
             raise ValueError("ID-ul contului activ nu a fost furnizat pentru import.")
 
-        # --- BLOC MODIFICAT PENTRU A PRELUA CREDENȚIALELE CORECT ---
+        # --- ÎNCEPUT BLOC DE COD MODIFICAT ---
+
         # Verificăm dacă handler-ul și credențialele există
         if not (hasattr(app_instance, 'db_handler') and app_instance.db_handler.db_credentials):
              raise ConnectionError("Credentialele DB nu sunt disponibile în instanța aplicației.")
         
-        # Preluăm parametrii de conexiune din dicționarul standardizat
+        # Preluăm și adaptăm parametrii de conexiune pentru PyMySQL
         conn_params = app_instance.db_handler.db_credentials.copy()
-        conn_params.update({
-            'charset': 'utf8mb4',
-            'collation': 'utf8mb4_unicode_ci',
-            'use_pure': True
-        })
-        # --- SFÂRȘIT BLOC MODIFICAT ---
-
-        thread_conn_local = mysql.connector.connect(**conn_params)
+        conn_params['db'] = conn_params.pop('database', None)       # Renumim 'database' in 'db'
+        conn_params['passwd'] = conn_params.pop('password', None) # Renumim 'password' in 'passwd'
+        conn_params['charset'] = 'utf8mb4'
+        
+        # Folosim pymysql.connect pentru a crea conexiunea
+        thread_conn_local = pymysql.connect(**conn_params)
+        
+        # --- SFÂRȘIT BLOC DE COD MODIFICAT ---
+        
         cursor = thread_conn_local.cursor()
 
         for i, file_path in enumerate(file_paths):
@@ -144,16 +144,11 @@ def threaded_import_worker(app_instance, file_paths, q_ref, active_account_id_fo
             new_codes_to_add = potential_new_tx_codes - known_tx_types
             
             if new_codes_to_add:
-                # Obținem toate descrierile standard într-un dicționar pentru căutări rapide
                 cursor.execute("SELECT cod_swift, descriere_standard FROM swift_code_descriptions")
                 swift_descriptions = {row[0]: row[1] for row in cursor.fetchall()}
 
                 for new_code in new_codes_to_add:
-                    # Căutăm descrierea standard în dicționar
-                    # Folosim .get() pentru a reveni la un text generic dacă codul nu este găsit
                     description = swift_descriptions.get(new_code, f"Tip nou, cod: {new_code}")
-                    
-                    # Inserăm în tipuri_tranzactii cu descrierea corectă
                     cursor.execute("INSERT INTO tipuri_tranzactii (cod, descriere_tip) VALUES (%s, %s)", (new_code, description))
                 
                 thread_conn_local.commit()
@@ -204,32 +199,39 @@ def threaded_import_worker(app_instance, file_paths, q_ref, active_account_id_fo
         cursor.close()
         q_ref.put(("done", "import_batch", (inserted, ignored)))
 
+    except pymysql.Error as e: # Prindem excepția specifică PyMySQL
+        error_message = f"O eroare DB a apărut în timpul importului:\n{type(e).__name__}: {e}"
+        logging.error(f"EROARE DB ÎN THREAD-UL DE IMPORT: {e}", exc_info=True)
+        if thread_conn_local:
+            try: thread_conn_local.rollback()
+            except: pass
+        q_ref.put(("error", "import_batch", error_message))
     except Exception as e:
-        error_message = f"O eroare a apărut în timpul importului:\n{type(e).__name__}: {e}"
+        error_message = f"O eroare generală a apărut în timpul importului:\n{type(e).__name__}: {e}"
         logging.error(f"EROARE CRITICĂ ÎN THREAD-UL DE IMPORT: {e}", exc_info=True)
         if thread_conn_local:
             try: thread_conn_local.rollback()
             except: pass
         q_ref.put(("error", "import_batch", error_message))
     finally:
-        if thread_conn_local and thread_conn_local.is_connected():
+        if thread_conn_local and thread_conn_local.open:
             thread_conn_local.close()
 
 def threaded_export_worker(app_instance, query_str, query_params, file_path_export, q_ref):
     """Funcția executată în thread pentru exportul în Excel, folosind SQLAlchemy."""
     engine = None
     try:
-        # --- BLOC MODIFICAT PENTRU A FOLOSI SQLAlchemy ---
 
         # 1. Preluăm credențialele din db_handler, așa cum am corectat anterior
         if not (hasattr(app_instance, 'db_handler') and app_instance.db_handler.db_credentials):
              raise ConnectionError("Credentialele DB nu sunt disponibile în instanța aplicației.")
         creds = app_instance.db_handler.db_credentials
 
-        # 2. Construim un URI (adresă) de conexiune standard pentru SQLAlchemy
+        # 2. Construim un URI (adresă) de conexiune standard
         # Format: dialect+driver://username:password@host:port/database
+        # Schimbăm driver-ul din 'mysql+mysqlconnector' în 'mysql+pymysql'
         db_uri = (
-            f"mysql+mysqlconnector://{creds['user']}:{creds['password']}"
+            f"mysql+pymysql://{creds['user']}:{creds['password']}"
             f"@{creds['host']}:{creds['port']}/{creds['database']}?charset=utf8mb4"
         )
         

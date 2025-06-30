@@ -1,9 +1,9 @@
-# config_management.py
+# common/config_management.py - VERSIUNE CORECTATĂ
+
 import os
 import logging
 import configparser
-# Importăm constantele din același pachet 'common'
-from .app_constants import APP_NAME, DEFAULT_TREEVIEW_DISPLAY_COLUMNS 
+from .app_constants import APP_NAME
 
 if os.name == 'nt':
     APP_DATA_DIR = os.path.join(os.getenv('LOCALAPPDATA'), APP_NAME)
@@ -25,40 +25,26 @@ def read_db_config_from_parser(config_parser_obj):
         user = config_parser_obj.get('Database', 'db_user', fallback=None)
         password = config_parser_obj.get('Database', 'db_password', fallback="")
 
-        if host and host.strip() and \
-           name and name.strip() and \
-           user and user.strip() and \
-           port_str and port_str.strip():
+        if host and host.strip() and name and name.strip() and user and user.strip() and port_str and port_str.strip():
             try:
                 port = int(port_str.strip())
             except ValueError:
-                port = 3306 # Port implicit
+                port = 3306
             
             db_credentials = {
-                "host": host.strip(),
-                "port": port,
-                "database": name.strip(),
-                "user": user.strip(),
-                "password": password
+                "host": host.strip(), "port": port, "database": name.strip(),
+                "user": user.strip(), "password": password
             }
     return db_credentials
 
-def save_app_config(app_instance, window_details=None):
-    """
-    Colectează toate setările și le salvează în baza de date
-    pentru utilizatorul curent. Salvează local doar credențialele DB.
-    """
-    # Pasul 1: Salvează local doar credențialele de conectare la DB.
+def save_db_credentials(db_creds_to_save):
+    """Salvează DOAR credențialele DB în fișierul de configurare local."""
     config = configparser.ConfigParser()
     if os.path.exists(CONFIG_FILE):
         config.read(CONFIG_FILE, encoding='utf-8')
-    
+
     if not config.has_section('Database'):
         config.add_section('Database')
-    
-    db_creds_to_save = {}
-    if hasattr(app_instance, 'db_handler') and app_instance.db_handler and app_instance.db_handler.db_credentials:
-        db_creds_to_save = app_instance.db_handler.db_credentials
 
     config.set('Database', 'db_host', db_creds_to_save.get('host', ''))
     config.set('Database', 'db_port', str(db_creds_to_save.get('port', 3306)))
@@ -69,35 +55,36 @@ def save_app_config(app_instance, window_details=None):
     try:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as configfile:
             config.write(configfile)
+        return True
     except Exception as e:
         logging.error(f"Eroare la scrierea config.ini (doar DB creds): {e}")
+        return False
+
+def save_app_config(app_instance, window_details=None):
+    """
+    Colectează toate setările și le salvează în baza de date
+    pentru utilizatorul curent. Salvează local doar credențialele DB.
+    """
+    # Pasul 1: Salvează local credențialele de conectare la DB.
+    db_creds_to_save = {}
+    if hasattr(app_instance, 'db_handler') and app_instance.db_handler and app_instance.db_handler.db_credentials:
+        db_creds_to_save = app_instance.db_handler.db_credentials
+    save_db_credentials(db_creds_to_save)
 
     # Pasul 2: Colectează TOATE setările UI într-un dicționar Python.
     if not (hasattr(app_instance, 'current_user') and app_instance.current_user and 
             app_instance.db_handler and app_instance.db_handler.is_connected()):
         return
 
-    # Încărcăm setările existente pentru a nu suprascrie alte chei
     settings = app_instance.user_settings if hasattr(app_instance, 'user_settings') else {}
 
-    # Setări Fereastră
-    if window_details:
-        settings['window'] = window_details
+    if window_details: settings['window'] = window_details
+    if hasattr(app_instance, 'smtp_config') and app_instance.smtp_config: settings['smtp'] = app_instance.smtp_config
 
-    # Setări SMTP
-    if hasattr(app_instance, 'smtp_config') and app_instance.smtp_config:
-        settings['smtp'] = app_instance.smtp_config
-
-    # Setări Generale
-    active_id_to_save = ""
-    if hasattr(app_instance, 'active_account_id') and app_instance.active_account_id is not None:
-        active_id_to_save = str(app_instance.active_account_id)
-    
-    # Asigurăm că 'general' există înainte de a-i adăuga chei
     if 'general' not in settings: settings['general'] = {}
-    settings['general']['active_account_id'] = active_id_to_save
+    if hasattr(app_instance, 'active_account_id') and app_instance.active_account_id is not None:
+        settings['general']['active_account_id'] = str(app_instance.active_account_id)
 
-    # Setări Filtre
     filters = {
         'date_range_mode': app_instance.date_range_mode_var.get(),
         'type': app_instance.type_var.get(),
@@ -114,22 +101,9 @@ def save_app_config(app_instance, window_details=None):
             filters['nav_day'] = str(app_instance.nav_selected_day or 0)
     settings['filters'] = filters
 
-    # Setări Lățime Coloane
     if hasattr(app_instance, 'tree') and app_instance.tree.winfo_exists():
-        widths = {}
-        for col_id in app_instance.treeview_display_columns:
-            try:
-                widths[col_id] = app_instance.tree.column(col_id, 'width')
-            except Exception:
-                pass
+        widths = {col_id: app_instance.tree.column(col_id, 'width') for col_id in app_instance.treeview_display_columns}
         settings['column_widths'] = widths
-        
-    # Setările de vizibilitate a tipurilor de tranzacții sunt salvate acum direct
-    # în `settings` de către `TransactionTypeManagerDialog` înainte de a apela `save_app_config`.
 
     # Pasul 3: Salvează dicționarul de setări în baza de date.
     app_instance.db_handler.save_user_settings(app_instance.current_user['id'], settings)
-
-# --- Am eliminat functiile load_column_widths_from_file, load_filters_from_parser, ---
-# --- load_window_config_from_file, load_transaction_type_visibility, save_transaction_type_visibility ---
-# --- Deoarece toate setările sunt acum încărcate unitar din DB la pornirea aplicației. ---
