@@ -19,7 +19,8 @@ import base64
 import argparse
 import time
 
-from common.app_constants import CHAT_COMMAND_PORT, VIEWER_COMMAND_PORT, SESSION_COMMAND_PORT
+
+from common.app_constants import CHAT_COMMAND_PORT, VIEWER_COMMAND_PORT, SESSION_COMMAND_PORT, VIEWER_LOCK_PORT
 
 
 # Importurile din pachetul comun (common/)
@@ -28,7 +29,10 @@ from common.app_constants import (
     MONTH_MAP_FOR_NAV, REVERSE_MONTH_MAP_FOR_NAV, CHAT_COMMAND_PORT,
     VIEWER_COMMAND_PORT, SESSION_COMMAND_PORT
 )
-from common.config_management import save_app_config, save_db_credentials
+# Înlocuiți "from common import config_management" cu aceste linii
+from common.config_management import (
+    save_app_config, save_db_credentials, read_db_config_from_parser, CONFIG_FILE, APP_DATA_DIR
+)
 from common.db_handler import DatabaseHandler, MariaDBConfigDialog
 from common import auth_handler
 
@@ -69,11 +73,41 @@ class BTViewerApp:
     def __init__(self, master, user_data, db_handler, user_settings):
         # --- Constructor modificat și corectat ---
         self.master = master
+
+        self.last_normal_geometry = {}  # Variabilă nouă pentru a stoca ultima geometrie
+        self.master.bind('<Configure>', self._on_configure) # Legăm evenimentul de o funcție nouă
+
         self.current_user = user_data
         self.db_handler = db_handler
         # NOU: Setările sunt primite ca parametru, nu citite dintr-un fișier
         self.user_settings = user_settings 
         
+        # Varianta nouă și corectă de aplicare a setărilor
+        window_settings = self.user_settings.get('window', {})
+
+        # Verificăm mai întâi dacă trebuie să maximizăm fereastra
+        if window_settings.get('state') == 'zoomed':
+            self.master.state('zoomed')
+        # Altfel, dacă era în stare normală, aplicăm geometria salvată
+        elif window_settings.get('state') == 'normal':
+            try:
+                width = int(window_settings.get('width', 1200))
+                height = int(window_settings.get('height', 800))
+                x = int(window_settings.get('x', 100))
+                y = int(window_settings.get('y', 100))
+
+                screen_width = self.master.winfo_screenwidth()
+                screen_height = self.master.winfo_screenheight()
+                if x + width < 0 or x > screen_width: x = 100
+                if y + height < 0 or y > screen_height: y = 100
+
+                self.master.geometry(f'{width}x{height}+{x}+{y}')
+            except (ValueError, TypeError):
+                self.master.geometry('1200x800')
+        # Dacă nu există nicio setare, folosim dimensiunea implicită
+        else:
+            self.master.geometry('1200x800')
+
         self.master.title(f"{APP_NAME} - Se încarcă datele...")
 
         # Inițializarea atributelor aplicației
@@ -152,6 +186,17 @@ class BTViewerApp:
         self.command_server_thread = threading.Thread(target=self._listen_for_commands, daemon=True)
         self.command_server_thread.start()
 
+    def _on_configure(self, event):
+        """Actualizează continuu ultima geometrie cunoscută a ferestrei."""
+        # Salvăm geometria doar dacă fereastra este în starea "normală"
+        if self.master.state() == 'normal':
+            self.last_normal_geometry = {
+                'width': self.master.winfo_width(),
+                'height': self.master.winfo_height(),
+                'x': self.master.winfo_x(),
+                'y': self.master.winfo_y()
+            }
+
     def _launch_or_show_chat(self):
         """
         Versiune finală, robustă: Verifică dacă aplicația de chat rulează.
@@ -173,8 +218,10 @@ class BTViewerApp:
             try:
                 # Logica robustă pentru a găsi calea executabilului
                 if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
-                    application_path = os.path.dirname(sys.executable)
-                    chat_executable_path = os.path.join(application_path, 'BTExtrasChat', 'BTExtrasChat.exe')
+                    # Mergem la directorul părintelui executabilului curent (ex: din 'dist/BTExtrasViewer' ajungem în 'dist')
+                    base_path = os.path.abspath(os.path.join(os.path.dirname(sys.executable), '..'))
+                    # Construim calea corectă de acolo
+                    chat_executable_path = os.path.join(base_path, 'BTExtrasChat', 'BTExtrasChat.exe')
                     command = [chat_executable_path]
                 else:
                     command = [sys.executable, '-m', 'BTExtrasChat.chat_main']
@@ -192,31 +239,24 @@ class BTViewerApp:
             messagebox.showerror("Eroare Necunoscută", f"A apărut o eroare la comunicarea cu aplicația de chat:\n{e}", parent=self.master)
 
     def _on_closing(self):
-        """
-        La apăsarea pe 'X', salvează starea curentă a UI-ului și doar
-        ascunde fereastra, fără a închide aplicația.
-        """
-        # Pas 1: Colectăm detaliile ferestrei (dimensiune, poziție)
-        # la fel cum făcea handle_app_exit.
-        window_details = {}
-        if self.master.winfo_exists():
-            # Salvăm starea ferestrei doar dacă nu este maximizată
-            if self.master.state() == 'normal':
-                try:
-                    window_details = {
-                        'width': str(self.master.winfo_width()),
-                        'height': str(self.master.winfo_height()),
-                        'x': str(self.master.winfo_x()),
-                        'y': str(self.master.winfo_y())
-                    }
-                except tk.TclError:
-                    pass # Fereastra ar putea fi deja pe cale de a fi distrusă
+        """ Salvează configurația la închidere, folosind datele monitorizate. """
+        window_settings_to_save = {}
+        current_state = self.master.state()
 
-        # Pas 2: Apelăm direct funcția de salvare a configurației,
-        # pasându-i detaliile ferestrei. Aceasta NU distruge fereastra.
-        config_management.save_app_config(self, window_details=window_details)
+        if current_state == 'zoomed':
+            window_settings_to_save = {'state': 'zoomed'}
+        elif current_state == 'normal':
+            # Folosim datele din `_on_configure`, care sunt cele mai recente
+            if self.last_normal_geometry:
+                window_settings_to_save = {'state': 'normal'}
+                # Convertim la string pentru a asigura compatibilitatea JSON
+                for key, value in self.last_normal_geometry.items():
+                    window_settings_to_save[key] = str(value)
 
-        # Pas 3: Acum, ascundem fereastra în siguranță.
+        # Salvăm doar dacă am colectat date valide
+        if window_settings_to_save:
+            save_app_config(self, window_details=window_settings_to_save)
+
         if self.master.winfo_exists():
             self.master.withdraw()
 
@@ -722,9 +762,18 @@ class BTViewerApp:
 
     def manage_roles(self):
         """Deschide dialogul de gestionare a rolurilor și permisiunilor."""
-        # Aici vom folosi noua clasă RoleManagerDialog
-        from .ui_dialogs import RoleManagerDialog # Am adăugat '.' pentru a face importul relativ
-        dialog = RoleManagerDialog(self.master, self.db_handler)
+        # --- MODIFICARE PENTRU TEST ---
+        # Am eliminat temporar "if self.has_permission(...)" pentru a forța deschiderea.
+        # Am păstrat blocul try/except pentru siguranță.
+        try:
+            RoleManagerDialog(self.master, self.db_handler)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror(
+                "Eroare la Deschiderea Dialogului",
+                f"A apărut o problemă la deschiderea ferestrei de gestionare a rolurilor:\n\n{type(e).__name__}: {e}"
+            )
 
     def create_menu(self):
         default_font_family = 'TkDefaultFont'
@@ -1531,55 +1580,45 @@ class BTViewerApp:
             return None
 
     def handle_db_config_from_menu(self):
-        # 1. Închidem orice conexiune existentă
-        if self.db_handler:
-            self.db_handler.close_connection()
-
-        # 2. Obținem și validăm noile credențiale
+        # 1. Mai întâi, deschidem dialogul și cerem noile credențiale,
+        # FĂRĂ a închide sau modifica conexiunea curentă.
         new_credentials = self.prompt_for_mariadb_credentials()
         
+        # Verificăm dacă fereastra principală încă există
         if not self.master.winfo_exists(): return
 
+        # 2. Acționăm DOAR DACĂ utilizatorul a furnizat credențiale noi și valide.
+        # Dacă new_credentials este None (utilizatorul a apăsat Anulare), nu facem nimic.
         if new_credentials:
-            # 3. Reconectare și verificare schemă cu noile credențiale
+            # 3. Abia acum, având o alternativă validă, închidem vechea conexiune.
+            if self.db_handler:
+                self.db_handler.close_connection()
+
             self.status_label.config(text="Reconectare la DB și verificare schemă...")
             self.master.update_idletasks()
             
+            # 4. Stabilim noua conexiune.
             self.db_handler = DatabaseHandler(db_credentials=new_credentials, app_master_ref=self.master)
             if not self.db_handler.connect() or not self.db_handler.check_and_setup_database_schema():
                 messagebox.showerror("Eroare Critică", "Nu s-a putut stabili o conexiune validă sau configura schema DB cu noile date.", parent=self.master)
                 self._toggle_action_buttons('disabled')
                 return
 
-            # 4. Salvăm noua configurație validă
-            config_management.save_app_config(self)
-
-            # 5. Resetăm starea internă a aplicației
-            self.status_label.config(text="Resetare și reîncărcare interfață...")
-            self.master.update_idletasks()
+            # 5. Salvăm noua configurație și reîmprospătăm interfața.
+            save_app_config(self)
             self.active_account_id = None
             self.accounts_list = []
             self.account_combo_var.set("")
             self.total_transaction_count = 0
             self.nav_selected_year, self.nav_selected_month_index, self.nav_selected_day = None, 0, 0
-            
-            # Curățăm treeview-urile
             if hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists():
                 for item in self.nav_tree.get_children(""): self.nav_tree.delete(item)
             if hasattr(self, 'tree') and self.tree.winfo_exists():
                 for item in self.tree.get_children(""): self.tree.delete(item)
             
-            # 6. Apelăm metoda corectă de populare a UI-ului
-            self.master.after(10, self.init_step4_populate_ui) # APEL CORECT
+            self.init_step4_populate_ui()
             
             messagebox.showinfo("Configurare Reușită", "Conexiunea la baza de date a fost actualizată cu succes.", parent=self.master)
-        else:
-            # Cazul în care utilizatorul a anulat sau credențialele au fost invalide
-            self.db_handler = None # Asigurăm că handler-ul este invalid
-            self.status_label.config(text="Configurare anulată/eșuată. Nicio conexiune DB.")
-            self._toggle_action_buttons('disabled')
-            self._populate_account_selector() # Golește combobox-ul de conturi
-            self.refresh_ui_for_account_change() # Golește restul UI-ului
 
     def _schedule_ui_population_steps(self, context_msg=""):
         if not self.master.winfo_exists(): return
@@ -2337,85 +2376,97 @@ class BTViewerApp:
             print(f"EROARE CRITICĂ: Serverul de comenzi al Viewer-ului NU a putut porni: {e}")
 
 if __name__ == "__main__":
-    log_file_path = os.path.join(config_management.APP_DATA_DIR, 'app_activity.log')
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s',
-        filename=log_file_path,
-        filemode='w',
-        encoding='utf-8'
-    )
-
-    db_handler_main = None
-    temp_root_main = tk.Tk()
-    temp_root_main.withdraw()
-
     try:
-        config = configparser.ConfigParser()
-        db_credentials_main = None
-        if os.path.exists(config_management.CONFIG_FILE):
-            config.read(config_management.CONFIG_FILE, encoding='utf-8')
-            db_credentials_main = config_management.read_db_config_from_parser(config)
+        lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        lock_socket.bind(("127.0.0.1", VIEWER_LOCK_PORT))
 
-        db_handler_main = DatabaseHandler(db_credentials=db_credentials_main, app_master_ref=temp_root_main)
-        if not db_handler_main.connect():
-            dialog_db = MariaDBConfigDialog(temp_root_main, initial_config=(db_credentials_main or {}))
-            creds = dialog_db.result
-            if creds and all(creds.values()):
-                db_handler_main.db_credentials = creds
-                save_db_credentials(creds)
-                if not db_handler_main.connect():
-                    raise ConnectionError("Eroare reconectare DB.")
-            else: raise ConnectionError("Configurare DB anulată.")
-
-        if not db_handler_main.check_and_setup_database_schema():
-            raise SystemError("Schema DB nu a putut fi creată/verificată.")
-
-        while True:
-            login_dialog = LoginDialog(temp_root_main, db_handler_main)
-            user_data = login_dialog.result
-            if not user_data: raise PermissionError("Autentificare anulată.")
-            if user_data.get('force_password_change') in [True, 1]:
-                messagebox.showinfo("Schimbare Parolă", "Schimbați parola inițială.", parent=temp_root_main)
-                change_dialog = ForcePasswordChangeDialog(temp_root_main, db_handler_main, user_data['id'], user_data['username'])
-                if change_dialog.result: continue 
-                else: raise PermissionError("Schimbare parolă anulată.")
-            break
+        log_file_path = os.path.join(APP_DATA_DIR, 'app_activity.log')
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s',
+            filename=log_file_path,
+            filemode='w', encoding='utf-8'
+        )
         
-        notify_session_manager(user_data)
-        user_settings = db_handler_main.get_user_settings(user_data['id'])
-        temp_root_main.destroy()
-
-        root = tk.Tk()
+        db_handler_main = None
+        temp_root_main = tk.Tk()
+        temp_root_main.withdraw()
+        
         try:
-            base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-            icon_path = os.path.join(base_path, 'assets', 'BT_logo.ico')
-            if os.path.exists(icon_path): root.iconbitmap(icon_path)
-        except Exception as e:
-            logging.error(f"Nu s-a putut seta iconul: {e}")
-        
-        window_cfg = user_settings.get('window', {})
-        window_geom = f"{window_cfg.get('width')}x{window_cfg.get('height')}+{window_cfg.get('x')}+{window_cfg.get('y')}" if window_cfg and all(k in window_cfg for k in ['width', 'height', 'x', 'y']) else None
-        if window_geom:
-            try: root.geometry(window_geom)
-            except tk.TclError: root.state('zoomed')
-        else:
-            root.state('zoomed')
+            # --- BLOC DE LOGICĂ CORECTAT ---
+            config = configparser.ConfigParser()
+            db_credentials_main = None
+            # Mai întâi citim fișierul, dacă există
+            if os.path.exists(CONFIG_FILE):
+                config.read(CONFIG_FILE, encoding='utf-8')
+            
+            # Abia apoi încercăm să extragem datele
+                db_credentials_main = read_db_config_from_parser(config)
+            
+            db_handler_main = DatabaseHandler(db_credentials=db_credentials_main, app_master_ref=temp_root_main)
 
-        app = BTViewerApp(root, user_data=user_data, db_handler=db_handler_main, user_settings=user_settings)
-        # Modificăm protocolul de închidere pentru a apela noua noastră metodă
-        root.protocol("WM_DELETE_WINDOW", app.on_closing)
-        root.mainloop()
+            if not db_handler_main.is_connected() and not db_handler_main.connect():
+                dialog_db = MariaDBConfigDialog(temp_root_main, initial_config=(db_credentials_main or {}))
+                creds = dialog_db.result
+                if creds and all(creds.values()):
+                    db_handler_main.db_credentials = creds
+                    # Salvăm noile credențiale și le setăm pentru handler
+                    save_db_credentials(creds)
+                    if not db_handler_main.connect():
+                        raise ConnectionError("Eroare reconectare DB după configurare.")
+                else:
+                    raise ConnectionError("Configurare DB anulată de utilizator.")
+            # --- SFÂRȘIT BLOC DE LOGICĂ CORECTAT ---
 
-    except (ConnectionError, SystemError, PermissionError) as e:
-        if 'db_handler_main' in locals() and db_handler_main.is_connected(): db_handler_main.close_connection()
-        if 'temp_root_main' in locals() and temp_root_main.winfo_exists():
-            messagebox.showerror("Eroare la Pornire", str(e), parent=temp_root_main)
+            if not db_handler_main.check_and_setup_database_schema():
+                raise SystemError("Schema DB nu a putut fi creată/verificată.")
+            while True:
+                login_dialog = LoginDialog(temp_root_main, db_handler_main)
+                user_data = login_dialog.result
+                if not user_data: raise PermissionError("Autentificare anulată.")
+                if user_data.get('force_password_change') in [True, 1]:
+                    messagebox.showinfo("Schimbare Parolă", "Schimbați parola inițială.", parent=temp_root_main)
+                    change_dialog = ForcePasswordChangeDialog(temp_root_main, db_handler_main, user_data['id'], user_data['username'])
+                    if change_dialog.result: continue 
+                    else: raise PermissionError("Schimbare parolă anulată.")
+                break
+            
+            notify_session_manager(user_data)
+            user_settings = db_handler_main.get_user_settings(user_data['id'])
             temp_root_main.destroy()
-        logging.error(f"Pornire eșuată: {e}")
-    except Exception as e_main:
-        if 'db_handler_main' in locals() and db_handler_main.is_connected(): db_handler_main.close_connection()
-        logging.critical(f"Eroare neașteptată: {e_main}", exc_info=True)
-        if 'temp_root_main' in locals() and temp_root_main.winfo_exists():
-            messagebox.showerror("Eroare Critică", f"Eroare neașteptată: {e_main}", parent=temp_root_main)
-            temp_root_main.destroy()
+
+            root = tk.Tk()
+
+            app = BTViewerApp(root, user_data=user_data, db_handler=db_handler_main, user_settings=user_settings)
+            root.protocol("WM_DELETE_WINDOW", app._on_closing)
+            root.mainloop()
+
+        except (ConnectionError, SystemError, PermissionError) as e:
+            # --- BLOCUL DE COD CORECT CARE TREBUIE RESTAURAT ---
+            if 'db_handler_main' in locals() and db_handler_main and db_handler_main.is_connected():
+                db_handler_main.close_connection()
+            if 'temp_root_main' in locals() and temp_root_main.winfo_exists():
+                messagebox.showerror("Eroare la Pornire", str(e), parent=temp_root_main)
+                temp_root_main.destroy()
+            logging.error(f"Pornire eșuată: {e}")
+            # --- SFÂRȘIT BLOC ---
+
+        except Exception as e_main:
+            if 'db_handler_main' in locals() and db_handler_main and db_handler_main.is_connected():
+                db_handler_main.close_connection()
+            logging.critical(f"Eroare neașteptată: {e_main}", exc_info=True)
+            if 'temp_root_main' in locals() and temp_root_main.winfo_exists():
+                messagebox.showerror("Eroare Critică", f"Eroare neașteptată: {e_main}", parent=temp_root_main)
+                temp_root_main.destroy()
+    
+    except OSError:
+        # Dacă bind() a eșuat, o altă instanță rulează. O notificăm să apară în prim-plan.
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect(('127.0.0.1', VIEWER_COMMAND_PORT))
+                s.sendall(b'SHOW_WINDOW')
+        except ConnectionRefusedError:
+            # Instanța veche există, dar serverul ei de comenzi nu răspunde. Doar ieșim.
+            pass
+        finally:
+            sys.exit(0)

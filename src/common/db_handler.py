@@ -186,51 +186,36 @@ CREATE TABLE IF NOT EXISTS chat_mesaje (
 """
 
 class MariaDBConfigDialog(simpledialog.Dialog):
+    # ... (Această clasă rămâne neschimbată) ...
     def __init__(self, parent, title=None, initial_config=None):
         self.initial_config = initial_config or {}
         super().__init__(parent, title or "Configurare Conexiune MariaDB")
-
     def body(self, master):
         tk.Label(master, text="Host (IP NAS):").grid(row=0, sticky=tk.W, pady=2)
         self.host_entry = tk.Entry(master, width=30)
         self.host_entry.grid(row=0, column=1, pady=2)
         self.host_entry.insert(0, self.initial_config.get('host', ''))
-
         tk.Label(master, text="Port:").grid(row=1, sticky=tk.W, pady=2)
         self.port_entry = tk.Entry(master, width=30)
         self.port_entry.grid(row=1, column=1, pady=2)
         self.port_entry.insert(0, self.initial_config.get('port', '3306'))
-
         tk.Label(master, text="Nume Bază Date:").grid(row=2, sticky=tk.W, pady=2)
         self.dbname_entry = tk.Entry(master, width=30)
         self.dbname_entry.grid(row=2, column=1, pady=2)
         self.dbname_entry.insert(0, self.initial_config.get('database', ''))
-
         tk.Label(master, text="Utilizator DB:").grid(row=3, sticky=tk.W, pady=2)
         self.user_entry = tk.Entry(master, width=30)
         self.user_entry.grid(row=3, column=1, pady=2)
         self.user_entry.insert(0, self.initial_config.get('user', ''))
-
         tk.Label(master, text="Parolă DB:").grid(row=4, sticky=tk.W, pady=2)
         self.password_entry = tk.Entry(master, show="*", width=30)
         self.password_entry.grid(row=4, column=1, pady=2)
         self.password_entry.insert(0, self.initial_config.get('password', ''))
-        
         return self.host_entry
-
     def apply(self):
-        try:
-            port = int(self.port_entry.get())
-        except (ValueError, TypeError):
-            port = 3306
-            
-        self.result = {
-            "host": self.host_entry.get().strip(),
-            "port": port,
-            "database": self.dbname_entry.get().strip(),
-            "user": self.user_entry.get().strip(),
-            "password": self.password_entry.get()
-        }
+        try: port = int(self.port_entry.get())
+        except (ValueError, TypeError): port = 3306
+        self.result = {"host": self.host_entry.get().strip(), "port": port, "database": self.dbname_entry.get().strip(), "user": self.user_entry.get().strip(), "password": self.password_entry.get()}
 
 class DatabaseHandler:
     def __init__(self, db_credentials=None, app_master_ref=None):
@@ -333,43 +318,44 @@ class DatabaseHandler:
             logging.error("Credentiale DB lipsesc. Conectare eșuată.")
             return False
         try:
+            # --- BLOC MODIFICAT PENTRU ROBUSTEȚE ---
             creds = self.db_credentials.copy()
-            # PyMySQL folosește 'db' în loc de 'database' și 'passwd' în loc de 'password'
-            creds['db'] = creds.pop('database')
-            creds['passwd'] = creds.pop('password')
             
-            self.conn = pymysql.connect(
-                **creds,
-                charset='utf8mb4',
-                cursorclass=DictCursor  # Asigură că rezultatele sunt dicționare, ca înainte
-            )
+            # Folosim .pop(cheie, None) pentru a ne asigura că nu crapă dacă o cheie lipsește.
+            # PyMySQL se va descurca cu valori None pentru 'db' și 'passwd' și va genera o eroare specifică.
+            creds['db'] = creds.pop('database', None)
+            creds['passwd'] = creds.pop('password', None)
+            
+            # Ne asigurăm că portul este un număr întreg
+            creds['port'] = int(creds.get('port', 3306))
+
+            self.conn = pymysql.connect(**creds, charset='utf8mb4', cursorclass=DictCursor, connect_timeout=5, read_timeout=5)
+            # --- SFÂRȘIT BLOC MODIFICAT ---
+
             logging.info(f"Conectat cu succes la DB '{self.db_credentials.get('database')}' pe host '{self.db_credentials.get('host')}'.")
             return True
-        except pymysql.Error as err:
-            logging.error(f"Eroare conectare la MariaDB: {err}")
+        except (pymysql.Error, TypeError, ValueError) as err:
+            logging.error(f"Eroare conectare la MariaDB cu PyMySQL: {err}")
             self.conn = None
             if self.app_master_ref:
                 messagebox.showerror("Eroare Conexiune DB", f"Nu s-a putut conecta la serverul de baze de date:\n{err}", parent=self.app_master_ref)
             return False
 
     def close_connection(self):
-        if self.conn and self.conn.is_connected():
+        # --- CORECȚIE AICI: Folosim .open în loc de .is_connected() ---
+        if self.conn and self.conn.open:
             self.conn.close()
             logging.info("Conexiune la baza de date închisă.")
 
     def is_connected(self):
-    # PyMySQL folosește atributul .open pentru a verifica starea conexiunii
-    return self.conn is not None and self.conn.open
+        # --- CORECȚIE AICI: Folosim .open în loc de .is_connected() ---
+        return self.conn is not None and self.conn.open
 
     def check_and_setup_database_schema(self):
-        """
-        Verifică și creează tabelele necesare.
-        Verifică și adaugă coloanele lipsă pentru a asigura compatibilitatea.
-        """
         if not self.is_connected():
             return False
         
-        cursor = None # Inițializăm cursorul ca None în afara blocului try
+        cursor = None
         try:
             cursor = self.conn.cursor()
             db_name = self.db_credentials.get('database')
@@ -378,7 +364,6 @@ class DatabaseHandler:
                 return False
 
             logging.info("Verificare și creare schemă DB...")
-            
             all_tables_scripts = [
                 DB_STRUCTURE_CONTURI_BANCARE_MARIADB, DB_STRUCTURE_TIPURI_TRANZACTII_MARIADB,
                 DB_STRUCTURE_UTILIZATORI, DB_STRUCTURE_ROLURI, DB_STRUCTURE_TRANZACTII_V2_MARIADB,
@@ -391,22 +376,20 @@ class DatabaseHandler:
             for table_script in all_tables_scripts:
                 cursor.execute(table_script)
             
-            # Verificare și adăugare coloane lipsă (migrare schemă)
-            cursor.execute(f"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'utilizatori' AND COLUMN_NAME = 'parola_schimbata_necesar'")
-            if cursor.fetchone()[0] == 0:
+            # --- CORECȚIE AICI: Folosim self.fetch_scalar pentru a evita KeyError ---
+            query_check_col1 = f"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'utilizatori' AND COLUMN_NAME = 'parola_schimbata_necesar'"
+            if self.fetch_scalar(query_check_col1) == 0:
                 logging.warning("Coloana 'parola_schimbata_necesar' lipsește. Se adaugă...")
                 cursor.execute("ALTER TABLE utilizatori ADD COLUMN parola_schimbata_necesar BOOLEAN NOT NULL DEFAULT TRUE")
                 logging.info("Coloana 'parola_schimbata_necesar' a fost adăugată cu succes.")
 
-            cursor.execute(f"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'utilizatori' AND COLUMN_NAME = 'last_seen'")
-            if cursor.fetchone()[0] == 0:
+            query_check_col2 = f"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'utilizatori' AND COLUMN_NAME = 'last_seen'"
+            if self.fetch_scalar(query_check_col2) == 0:
                 logging.warning("Coloana 'last_seen' lipsește. Se adaugă...")
                 cursor.execute("ALTER TABLE utilizatori ADD COLUMN last_seen TIMESTAMP NULL")
                 logging.info("Coloana 'last_seen' a fost adăugată cu succes.")
 
             self.conn.commit()
-            
-            # Populăm datele inițiale dacă este necesar.
             self._seed_initial_data()
             self._seed_swift_codes_table()
             self._seed_valute_table()
@@ -419,7 +402,6 @@ class DatabaseHandler:
             messagebox.showerror("Eroare Bază de Date", f"A apărut o problemă la verificarea structurii bazei de date:\n{err}", parent=self.app_master_ref)
             return False
         finally:
-            # MODIFICARE: Verificăm doar dacă cursorul a fost creat înainte de a-l închide.
             if cursor:
                 cursor.close()
 
@@ -427,56 +409,57 @@ class DatabaseHandler:
         if not self.is_connected(): return
 
         try:
+            # Creare roluri (dacă nu există)
             if self.fetch_scalar("SELECT COUNT(*) FROM roluri") == 0:
+                # ... (logica de creare roluri rămâne aceeași) ...
                 logging.info("Nu există roluri. Se inserează rolurile implicite...")
                 with self.conn.cursor() as cursor:
                     cursor.execute("INSERT INTO roluri (nume_rol, descriere) VALUES (%s, %s)", ('Administrator', 'Acces total la toate funcționalitățile aplicației.'))
                     id_rol_admin = cursor.lastrowid
                     cursor.execute("INSERT INTO roluri_permisiuni (id_rol, cheie_permisiune) VALUES (%s, %s)", (id_rol_admin, 'all_permissions'))
-                    
                     cursor.execute("INSERT INTO roluri (nume_rol, descriere) VALUES (%s, %s)", ('Operator Date', 'Acces limitat pentru import și vizualizare rapoarte.'))
                     id_rol_operator = cursor.lastrowid
-                    
-                    # --- MODIFICAT: Adăugăm noua permisiune pentru SMTP ---
-                    permisiuni_operator = [
-                        'import_files', 'export_data', 'view_reports', 'run_report_cashflow', 
-                        'run_report_balance_evolution', 'run_report_transaction_analysis', 
-                        'view_import_history', 'configure_smtp'
-                    ]
-
-                    cursor.execute("INSERT INTO roluri_permisiuni (id_rol, cheie_permisiune) VALUES (%s, %s)", (id_rol_admin, 'manage_swift_codes'))
-
+                    permisiuni_operator = ['import_files', 'export_data', 'view_reports', 'run_report_cashflow', 'run_report_balance_evolution', 'run_report_transaction_analysis', 'view_import_history', 'configure_smtp', 'edit_transaction_notes','manage_swift_codes', 'manage_currencies']
                     for perm in permisiuni_operator:
                         cursor.execute("INSERT INTO roluri_permisiuni (id_rol, cheie_permisiune) VALUES (%s, %s)", (id_rol_operator, perm))
-
                 self.conn.commit()
-                logging.info("Rolurile 'Administrator' și 'Operator Date' au fost create.")
 
+            # Creare utilizator 'admin' (dacă nu există)
             if self.fetch_scalar("SELECT COUNT(*) FROM utilizatori") == 0:
-                # ... (restul metodei rămâne neschimbat) ...
                 logging.info("Nu există utilizatori. Se creează utilizatorul 'admin' implicit...")
                 admin_user, admin_pass = 'admin', 'admin123'
-                salt, pass_hash = auth_handler.hash_parola(admin_pass)
+                
+                # --- BLOC MODIFICAT PENTRU SALVARE CORECTĂ ---
+                salt, pass_hash = auth_handler.hash_parola(admin_pass) # Despachetăm tuplul
+                
                 with self.conn.cursor() as cursor:
-                    query_user = "INSERT INTO utilizatori (username, parola_hash, salt, nume_complet, activ) VALUES (%s, %s, %s, %s, %s)"
-                    cursor.execute(query_user, (admin_user, pass_hash, salt, 'Administrator Sistem', True))
+                    query_user = """
+                        INSERT INTO utilizatori 
+                        (username, parola_hash, salt, nume_complet, activ, parola_schimbata_necesar) 
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """
+                    # Inserăm hash-ul și sarea în coloanele lor separate
+                    cursor.execute(query_user, (admin_user, pass_hash, salt, 'Administrator Sistem', True, False))
                     id_user_admin = cursor.lastrowid
+                # --- SFÂRȘIT BLOC MODIFICAT ---
+
                     id_rol_admin = self.fetch_scalar("SELECT id FROM roluri WHERE nume_rol = 'Administrator'")
                     if id_user_admin and id_rol_admin:
                         query_role = "INSERT INTO utilizatori_roluri (id_utilizator, id_rol) VALUES (%s, %s)"
                         cursor.execute(query_role, (id_user_admin, id_rol_admin))
+                
                 self.conn.commit()
                 logging.warning(f"Utilizator 'admin' creat cu parola temporară: '{admin_pass}'")
                 if self.app_master_ref:
                     messagebox.showinfo("Utilizator Implicit Creat", f"A fost creat un cont de administrator:\n\nUtilizator: {admin_user}\nParolă: {admin_pass}", parent=self.app_master_ref)
         except pymysql.Error as err:
-            logging.error(f"Eroare la inserarea datelor inițiale (seed): {err.msg}")
+            logging.error(f"Eroare la inserarea datelor inițiale (seed): {err}")
             self.conn.rollback()
 
     def fetch_all_dict(self, query, params=None):
         if not self.is_connected(): return []
         try:
-            with self.conn.cursor(dictionary=True) as cursor:
+            with self.conn.cursor() as cursor:
                 cursor.execute(query, params or ())
                 return cursor.fetchall()
         except pymysql.Error as e:
@@ -486,7 +469,7 @@ class DatabaseHandler:
     def fetch_one_dict(self, query, params=None):
         if not self.is_connected(): return None
         try:
-            with self.conn.cursor(dictionary=True) as cursor:
+            with self.conn.cursor() as cursor:
                 cursor.execute(query, params or ())
                 return cursor.fetchone()
         except pymysql.Error as e:
@@ -583,10 +566,10 @@ class DatabaseHandler:
         if not self.is_connected(): return None
         try:
             # Adăugăm buffered=True pentru a rezolva definitiv eroarea "Unread result"
-            with self.conn.cursor(buffered=True) as cursor:
+            with self.conn.cursor() as cursor:
                 cursor.execute(query, params or ())
                 result = cursor.fetchone()
-            return result[0] if result and len(result) > 0 else None
+            return list(result.values())[0] if result else None
         except pymysql.Error as e:
             logging.error(f"Eroare SQL la fetch_scalar: {e.msg}")
             return None

@@ -44,3 +44,8 @@ CHAT_COMMAND_PORT = 12345
 # Constante pentru combinațiile de taste globale
 GLOBAL_HOTKEY_CHAT = 'ctrl+alt+c'
 GLOBAL_HOTKEY_VIEWER = 'ctrl+alt+b'
+
+# Porturi arbitrare pentru blocarea de instanță unică
+SESSION_MANAGER_LOCK_PORT = 54321
+VIEWER_LOCK_PORT = 54322
+CHAT_LOCK_PORT = 54323

@@ -114,34 +114,34 @@ class ChatWindow:
         """Rulează în fundal, caută mesaje noi și trimite heartbeat."""
         polling_conn = None
         try:
-            # --- BLOC MODIFICAT PENTRU PyMySQL ---
+            # Stabilește o conexiune la DB specifică pentru acest thread
             creds = self.db_creds.copy()
             creds['db'] = creds.pop('database')
             creds['passwd'] = creds.pop('password')
-            polling_conn = pymysql.connect(**creds, charset='utf8mb4', cursorclass=DictCursor)
+            polling_conn = pymysql.connect(**creds, charset='utf8mb4', cursorclass=DictCursor, read_timeout=5, connect_timeout=5)
             
             while self.is_running:
                 cursor = None
                 try:
-                    cursor = polling_conn.cursor(dictionary=True)
+                    # CORECȚIA 1: Am eliminat argumentul 'dictionary=True'
+                    cursor = polling_conn.cursor()
+                    
+                    # Trimite heartbeat (actualizează 'last_seen')
                     cursor.execute(
                         "UPDATE utilizatori SET last_seen = CURRENT_TIMESTAMP WHERE id = %s",
                         (self.current_user['id'],)
                     )
                     polling_conn.commit()
 
+                    # Caută mesaje noi
                     sql_select_new = """
                         SELECT
                             m.id, m.id_conversatie_fk, m.id_expeditor_fk, m.continut_mesaj, m.timestamp, m.stare,
                             COALESCE(u.nume_complet, u.username) AS expeditor
-                        FROM
-                            chat_mesaje m
+                        FROM chat_mesaje m
                         JOIN chat_participanti p ON m.id_conversatie_fk = p.id_conversatie_fk
                         JOIN utilizatori u ON m.id_expeditor_fk = u.id
-                        WHERE
-                            p.id_utilizator_fk = %s
-                            AND m.id_expeditor_fk != %s
-                            AND m.stare = 'trimis'
+                        WHERE p.id_utilizator_fk = %s AND m.id_expeditor_fk != %s AND m.stare = 'trimis'
                     """
                     cursor.execute(sql_select_new, (self.current_user['id'], self.current_user['id']))
                     new_messages = cursor.fetchall()
@@ -159,10 +159,11 @@ class ChatWindow:
                             self.message_queue.put(msg)
 
                 except pymysql.Error as db_err:
-                    print(f"Eroare DB în bucla de polling: {db_err}.")
+                    print(f"Eroare DB în bucla de polling: {db_err}. Se încearcă reconectarea...")
                     time.sleep(10)
+                    # CORECȚIA 2: Verificăm conexiunea cu .open și ne reconectăm cu PyMySQL
                     if not (polling_conn and polling_conn.open):
-                        polling_conn = mysql.connector.connect(**self.db_creds)
+                        polling_conn = pymysql.connect(**creds, charset='utf8mb4', cursorclass=DictCursor, read_timeout=5, connect_timeout=5)
                 finally:
                     if cursor:
                         cursor.close()
@@ -171,8 +172,23 @@ class ChatWindow:
         except Exception as e:
             print(f"EROARE CRITICĂ în thread-ul de polling: {e}")
         finally:
-            if polling_conn and polling_conn.is_connected():
+            # CORECȚIA 3: Folosim .open pentru a verifica starea conexiunii înainte de a o închide
+            if polling_conn and polling_conn.open:
                 polling_conn.close()
+
+    def _quit_application(self):
+        """Oprește toate procesele de fundal și închide complet aplicația."""
+        self.is_running = False
+        # Ne asigurăm că thread-ul de comenzi se oprește prin închiderea socket-ului
+        # Acest pas este opțional, dar curat - închiderea aplicației oricum va opri thread-ul daemon
+        try:
+            # Ne conectăm la propriul server pentru a-l debloca din 'accept'
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect(('127.0.0.1', CHAT_COMMAND_PORT))
+        except:
+            pass # Ignorăm erorile, scopul este doar deblocarea
+
+        self.master.after(100, self.master.destroy)
 
     def _process_message_queue(self):
         """Procesează mesajele și comenzile speciale din coadă."""
@@ -235,6 +251,13 @@ class ChatWindow:
 
     def _setup_ui(self):
         """Construiește componentele vizuale ale ferestrei."""
+        # --- BLOC NOU PENTRU CREAREA MENIULUI ---
+        menubar = tk.Menu(self.master)
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Ieșire", command=self._quit_application)
+        menubar.add_cascade(label="Fișier", menu=file_menu)
+        self.master.config(menu=menubar)
+        # --- SFÂRȘIT BLOC ---
         main_pane = ttk.PanedWindow(self.master, orient=tk.HORIZONTAL)
         main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 

@@ -11,9 +11,9 @@ import configparser
 import threading
 
 # Linii CORECTATE și standardizate
-from common.config_management import read_db_config_from_parser, save_db_credentials
-from common.db_handler import DatabaseHandler, MariaDBConfigDialog
-from common.app_constants import CHAT_COMMAND_PORT
+from common import config_management
+from common import db_handler
+from common.app_constants import CHAT_COMMAND_PORT, CHAT_LOCK_PORT
 from BTExtrasViewer.ui_dialogs import LoginDialog, ForcePasswordChangeDialog
 from BTExtrasChat.chat_ui import ChatWindow
 
@@ -39,27 +39,28 @@ def main():
         temp_root.withdraw()
 
         config = configparser.ConfigParser()
+        if os.path.exists(config_management.CONFIG_FILE):
+            config.read(config_management.CONFIG_FILE, encoding='utf-8')
+        
         db_credentials = config_management.read_db_config_from_parser(config)
-        if not db_credentials:
-            if os.path.exists(config_management.CONFIG_FILE):
-                config.read(config_management.CONFIG_FILE, encoding='utf-8')
-                db_credentials = config_management.read_db_config_from_parser(config)
-
+        
         database = db_handler.DatabaseHandler(db_credentials=db_credentials, app_master_ref=temp_root)
-        if not database.connect():
+
+        if not database.is_connected() and not database.connect():
             dialog = db_handler.MariaDBConfigDialog(temp_root, initial_config=(db_credentials or {}))
             creds = dialog.result
             if creds and all(creds.values()):
+                config_management.save_db_credentials(creds)
                 database.db_credentials = creds
-                save_db_credentials(creds)
-                if not database.connect(): raise ConnectionError("Eroare reconectare DB.")
-            else: raise ConnectionError("Configurare DB anulată.")
+                if not database.connect():
+                    raise ConnectionError("Eroare reconectare DB.")
+            else:
+                raise ConnectionError("Configurare DB anulată.")
 
         database.conn.autocommit = True
         
         user_data = pre_authenticated_user
         if not user_data:
-            print("INFO (Chat): Se afișează dialogul de login.")
             while True:
                 login_dialog = LoginDialog(temp_root, database)
                 user_data = login_dialog.result
@@ -73,10 +74,14 @@ def main():
 
         if user_data:
             app_root = tk.Tk()
+            # Folosim db_credentials de la început pentru a le pasa mai departe
             app = ChatWindow(app_root, database, user_data, db_credentials)
             app_root.protocol("WM_DELETE_WINDOW", app.on_closing)
+            
+            # Distrugem fereastra temporară AICI, înainte de a intra în bucla principală
             if temp_root.winfo_exists():
                 temp_root.destroy()
+            
             app_root.mainloop()
 
     except (ConnectionError, PermissionError) as e:
@@ -88,8 +93,28 @@ def main():
         if 'temp_root' in locals() and temp_root.winfo_exists():
             messagebox.showerror("Eroare Critică Chat", f"Eroare neașteptată: {e}", parent=temp_root)
     finally:
-        if 'temp_root' in locals() and temp_root.winfo_exists(): temp_root.destroy()
-        if database and database.is_connected(): database.close_connection()
+        # --- BLOC MODIFICAT ---
+        # Am eliminat linia care încerca să distrugă temp_root, deoarece este deja distrusă mai sus.
+        # Lăsăm doar închiderea conexiunii la DB.
+        if database and database.is_connected():
+            database.close_connection()
 
 if __name__ == "__main__":
-    main()
+    try:
+        # Încercăm să creăm un "lacăt" pe un port specific pentru Chat
+        lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        lock_socket.bind(("127.0.0.1", CHAT_LOCK_PORT))
+
+        # Dacă am reușit, suntem prima instanță. Rulăm logica normală.
+        main() # Am încapsulat logica originală într-o funcție main()
+
+    except OSError:
+        # Dacă bind() a eșuat, o altă instanță rulează. O notificăm.
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect(('127.0.0.1', CHAT_COMMAND_PORT))
+                s.sendall(b'SHOW_WINDOW')
+        except ConnectionRefusedError:
+            pass
+        finally:
+            sys.exit(0)

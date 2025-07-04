@@ -16,6 +16,7 @@ class RoleManagerDialog(simpledialog.Dialog):
     def __init__(self, parent, db_handler):
         self.db_handler = db_handler
         self.selected_role_id = None
+        self.all_roles_data = []
         
         self.ALL_PERMISSIONS = {
             "Gestiune Utilizatori și Roluri": [
@@ -54,11 +55,11 @@ class RoleManagerDialog(simpledialog.Dialog):
         super().__init__(parent, "Gestionare Roluri și Permisiuni")
 
     def body(self, master):
-        main_pane = tk.PanedWindow(master, orient=tk.HORIZONTAL)
-        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        roles_frame = ttk.LabelFrame(main_pane, text="Roluri definite", width=200)
-        main_pane.add(roles_frame, stretch="never")
+        main_frame = ttk.Frame(master)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        roles_frame = ttk.LabelFrame(main_frame, text="Roluri definite", width=250)
+        roles_frame.pack(side=tk.LEFT, fill=tk.Y, padx=5, pady=5)
 
         self.roles_listbox = tk.Listbox(roles_frame, exportselection=False)
         self.roles_listbox.pack(fill=tk.BOTH, expand=True, pady=5, padx=5)
@@ -74,30 +75,30 @@ class RoleManagerDialog(simpledialog.Dialog):
         self.delete_role_btn = ttk.Button(roles_buttons_frame, text="Șterge", command=self._delete_role, state=tk.DISABLED)
         self.delete_role_btn.pack(side=tk.LEFT, expand=True, fill=tk.X)
 
-        self.permissions_main_frame = ttk.LabelFrame(main_pane, text="Permisiuni pentru rolul selectat")
-        main_pane.add(self.permissions_main_frame, stretch="always")
+        self.permissions_main_frame = ttk.LabelFrame(main_frame, text="Permisiuni pentru rolul selectat")
+        self.permissions_main_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=5, pady=5)
         
-        # --- MODIFICARE: Stocăm widget-urile, nu variabilele ---
-        self.permission_widgets = {} 
-        row_num = 0
+        self.permission_widgets = {}
         for category, perms in self.ALL_PERMISSIONS.items():
             cat_frame = ttk.LabelFrame(self.permissions_main_frame, text=category)
-            cat_frame.pack(fill=tk.X, padx=10, pady=5)
+            cat_frame.pack(fill=tk.X, padx=10, pady=5, anchor="n")
             for key, desc in perms:
                 var = tk.BooleanVar()
                 cb = ttk.Checkbutton(cat_frame, text=desc, variable=var, state=tk.DISABLED)
-                # --- NOU: Atașăm variabila direct de widget ---
-                cb.var = var 
-                cb.pack(anchor=tk.W, padx=5)
-                # --- MODIFICARE: Stocăm widget-ul (cb) ---
-                self.permission_widgets[key] = cb 
-            row_num += 1
+                cb.var = var
+                cb.pack(anchor=tk.W, padx=5, pady=1)
+                self.permission_widgets[key] = cb
             
         self.save_perms_btn = ttk.Button(self.permissions_main_frame, text="Salvează Permisiunile pentru Rol", command=self._save_permissions, state=tk.DISABLED)
-        self.save_perms_btn.pack(pady=10)
+        self.save_perms_btn.pack(pady=10, side=tk.BOTTOM)
 
         self._load_roles()
         return self.roles_listbox
+
+    def buttonbox(self):
+        # Butonul de închidere este acum adăugat în metoda 'body' a dialogului principal al aplicației.
+        # Lăsăm această funcție goală pentru a urma modelul celorlalte dialoguri complexe.
+        pass
 
     def _on_role_select(self, event):
         selections = self.roles_listbox.curselection()
@@ -106,21 +107,17 @@ class RoleManagerDialog(simpledialog.Dialog):
             self.rename_role_btn.config(state=tk.DISABLED)
             self.delete_role_btn.config(state=tk.DISABLED)
             self.save_perms_btn.config(state=tk.DISABLED)
-            # --- MODIFICARE: Lucrăm cu widget-uri ---
             for key, widget in self.permission_widgets.items():
                 widget.var.set(False)
                 widget.config(state=tk.DISABLED)
         else:
             selected_index = selections[0]
             self.selected_role_id = self.all_roles_data[selected_index]['id']
-            
             is_admin_role = (self.selected_role_id == 1)
             self.rename_role_btn.config(state=tk.DISABLED if is_admin_role else tk.NORMAL)
             self.delete_role_btn.config(state=tk.DISABLED if is_admin_role else tk.NORMAL)
             self.save_perms_btn.config(state=tk.NORMAL)
-            
             role_permissions = self.db_handler.get_role_permissions(self.selected_role_id)
-            # --- MODIFICARE: Lucrăm cu widget-uri și variabilele lor atașate ---
             for key, widget in self.permission_widgets.items():
                 is_checked = key in role_permissions or 'all_permissions' in role_permissions
                 widget.var.set(is_checked)
@@ -128,30 +125,26 @@ class RoleManagerDialog(simpledialog.Dialog):
 
     def _save_permissions(self):
         if not self.selected_role_id: return
-        # --- MODIFICARE: Citim starea de la variabila atașată widget-ului ---
         selected_permissions = [key for key, widget in self.permission_widgets.items() if widget.var.get()]
         if self.db_handler.save_permissions_for_role(self.selected_role_id, selected_permissions):
             messagebox.showinfo("Succes", "Permisiunile au fost salvate cu succes.", parent=self)
         else:
             messagebox.showerror("Eroare", "A apărut o eroare la salvarea permisiunilor.", parent=self)
 
-    # ... restul metodelor (_load_roles, _add_role, etc.) rămân neschimbate ...
-    def buttonbox(self):
-        box = ttk.Frame(self)
-        ttk.Button(box, text="Închide", width=15, command=self.ok).pack(pady=5)
-        box.pack()
     def _load_roles(self):
         self.roles_listbox.delete(0, tk.END)
         self.all_roles_data = self.db_handler.get_all_roles()
         for role in self.all_roles_data:
             self.roles_listbox.insert(tk.END, role['nume_rol'])
         self._on_role_select(None)
+
     def _add_role(self):
         new_name = simpledialog.askstring("Adaugă Rol", "Introduceți numele noului rol:", parent=self)
         if new_name and new_name.strip():
             success, message = self.db_handler.add_role(new_name.strip())
             if success: self._load_roles()
             else: messagebox.showerror("Eroare", message, parent=self)
+
     def _rename_role(self):
         if not self.selected_role_id: return
         current_name = self.roles_listbox.get(self.roles_listbox.curselection()[0])
@@ -160,6 +153,7 @@ class RoleManagerDialog(simpledialog.Dialog):
             success, message = self.db_handler.rename_role(self.selected_role_id, new_name.strip())
             if success: self._load_roles()
             else: messagebox.showerror("Eroare", message, parent=self)
+
     def _delete_role(self):
         if not self.selected_role_id: return
         current_name = self.roles_listbox.get(self.roles_listbox.curselection()[0])
@@ -237,43 +231,24 @@ class AccountEditDialog(simpledialog.Dialog):
                 self.selected_color = '#FFFFFF'
                 self.color_preview.config(background=self.selected_color)
     def validate(self):
-        name = self.name_entry.get().strip()
-        iban = self.iban_entry.get().strip().upper()
-        if not name:
-            messagebox.showwarning("Validare Eșuată", "Numele contului este obligatoriu.", parent=self)
-            return False
-        if iban and not (len(iban) >= 15 and len(iban) <= 34 and iban.isalnum()):
-            messagebox.showwarning("Validare Eșuată", "IBAN-ul, dacă este specificat, trebuie să aibă între 15 și 34 de caractere alfanumerice.", parent=self)
-            return False
-        if not re.match(r"^#[0-9a-fA-F]{6}$", self.selected_color):
-            messagebox.showwarning("Validare Eșuată", "Formatul culorii selectate este invalid. Trebuie să fie de tipul #RRGGBB.", parent=self)
-            return False
-        query_name = "SELECT id_cont FROM conturi_bancare WHERE nume_cont = %s"
-        params_name = [name]
-        if self.account_data and 'id_cont' in self.account_data:
-            query_name += " AND id_cont != %s"
-            params_name.append(self.account_data['id_cont'])
-        try:
-            if self.db_handler.fetch_scalar(query_name, tuple(params_name)):
-                messagebox.showwarning("Validare Eșuată", "Un cont cu acest nume există deja.", parent=self)
-                return False
-        except pymysql.Error as e:
-            messagebox.showerror("Eroare DB", f"Eroare la verificarea numelui contului: {e}", parent=self)
-            return False
-        if iban:
-            query_iban = "SELECT id_cont FROM conturi_bancare WHERE iban = %s"
-            params_iban = [iban]
-            if self.account_data and 'id_cont' in self.account_data:
-                query_iban += " AND id_cont != %s"
-                params_iban.append(self.account_data['id_cont'])
+        nume_cont = self.name_entry.get().strip()
+        if not nume_cont:
+            messagebox.showwarning("Date Incomplete", "Numele contului este obligatoriu.", parent=self)
+            return 0  # 0 înseamnă eșec, dialogul rămâne deschis
+
+        # Verificăm dacă numele contului există deja, doar la adăugare
+        if not self.account_data:  # account_data este None doar când adăugăm un cont nou
             try:
-                if self.db_handler.fetch_scalar(query_iban, tuple(params_iban)):
-                    messagebox.showwarning("Validare Eșuată", "Un cont cu acest IBAN există deja.", parent=self)
-                    return False
+                existing_account = self.db_handler.fetch_one_dict("SELECT id_cont FROM conturi_bancare WHERE nume_cont = %s", (nume_cont,))
+                if existing_account:
+                    messagebox.showerror("Nume Duplicat", "Un cont cu acest nume există deja.", parent=self)
+                    return 0
             except pymysql.Error as e:
-                messagebox.showerror("Eroare DB", f"Eroare la verificarea IBAN-ului: {e}", parent=self)
-                return False
-        return True
+                messagebox.showerror("Eroare DB", f"Nu s-a putut verifica unicitatea numelui:\n{e}", parent=self)
+                return 0
+        
+        return 1  # 1 înseamnă succes, dialogul se va închide
+        
     def apply(self):
         self.result = {"nume_cont": self.name_entry.get().strip(), "iban": self.iban_entry.get().strip().upper() or None, "nume_banca": self.bank_entry.get().strip() or None, "valuta": self.currency_var.get(), "observatii_cont": self.obs_text.get("1.0", tk.END).strip() or None, "culoare_cont": self.selected_color}
 
@@ -339,12 +314,21 @@ class AccountManagerDialog(simpledialog.Dialog):
         if dialog.result:
             try:
                 sql = """INSERT INTO conturi_bancare (nume_cont, iban, nume_banca, valuta, observatii_cont, culoare_cont) VALUES (%s, %s, %s, %s, %s, %s)"""
-                params = (dialog.result['nume_cont'], dialog.result['iban'], dialog.result['nume_banca'], dialog.result['valuta'], dialog.result['observatii_cont'], dialog.result.get('culoare_cont', '#FFFFFF'))
+                params = (
+                    dialog.result['nume_cont'], 
+                    dialog.result['iban'], 
+                    dialog.result['nume_banca'], 
+                    dialog.result['valuta'], 
+                    dialog.result['observatii_cont'], 
+                    dialog.result.get('culoare_cont', '#FFFFFF')
+                )
                 if self.db_handler.execute_commit(sql, params):
                     messagebox.showinfo("Succes", "Contul a fost adăugat.", parent=self)
                     self.load_accounts()
             except Exception as e:
+                # Acest bloc prinde eroarea și afișează fereastra pe care ați văzut-o
                 messagebox.showerror("Eroare Adăugare", f"Eroare: {e}", parent=self)
+                
     def _on_edit_account(self):
         if not self.selected_account_id:
             messagebox.showwarning("Atenție", "Selectați un cont pentru a-l modifica.", parent=self)
@@ -619,52 +603,59 @@ class LoginDialog(simpledialog.Dialog):
         return self.username_entry
 
     def validate(self):
-        username = self.username_entry.get().strip()
-        password = self.password_entry.get()
-        if not username or not password:
-            messagebox.showwarning("Date lipsă", "Numele de utilizator și parola sunt obligatorii.", parent=self)
-            return False
-        
-        user_db_data = self.db_handler.get_user_by_username(username)
-        
-        if not user_db_data:
-            messagebox.showerror("Autentificare eșuată", "Nume de utilizator sau parolă incorectă.", parent=self)
-            return False
-        
-        if not user_db_data.get('activ'):
-            messagebox.showerror("Cont inactiv", "Acest cont de utilizator este inactiv.", parent=self)
-            return False
+        try:
+            username = self.username_entry.get().strip()
+            password = self.password_entry.get()
+            if not username or not password:
+                messagebox.showwarning("Date lipsă", "Numele de utilizator și parola sunt obligatorii.", parent=self)
+                return False
             
-        is_password_valid = auth_handler.verifica_parola(
-            parola_introdusa=password, 
-            salt_hex=user_db_data['salt'], 
-            hash_stocat_hex=user_db_data['parola_hash']
-        )
+            user_db_data = self.db_handler.get_user_by_username(username)
+            
+            if not user_db_data:
+                messagebox.showerror("Autentificare eșuată", "Nume de utilizator sau parolă incorectă.", parent=self)
+                return False
+            
+            if not user_db_data.get('activ'):
+                messagebox.showerror("Cont inactiv", "Acest cont de utilizator este inactiv.", parent=self)
+                return False
+            
+            # --- BLOC MODIFICAT PENTRU APEL CORECT ---
+            is_password_valid = auth_handler.verifica_parola(
+                parola_introdusa=password, 
+                salt_hex=user_db_data.get('salt'), 
+                hash_stocat_hex=user_db_data.get('parola_hash')
+            )
+            # --- SFÂRȘIT BLOC MODIFICAT ---
 
-        if not is_password_valid:
-            messagebox.showerror("Autentificare eșuată", "Nume de utilizator sau parolă incorectă.", parent=self)
-            return False
+            if not is_password_valid:
+                messagebox.showerror("Autentificare eșuată", "Nume de utilizator sau parolă incorectă.", parent=self)
+                return False
             
-        user_id = user_db_data['id']
-        permissions = self.db_handler.get_user_permissions(user_id)
-        allowed_accounts = self.db_handler.get_allowed_accounts_for_user(user_id)
-        
-        # --- BLOCUL DE COD CORECT ȘI COMPLET ---
-        self.result = {
-            'id': user_id,
-            'username': username,
-            'nume_complet': user_db_data.get('nume_complet'),
-            'permissions': permissions, 
-            'allowed_accounts': allowed_accounts,
-            'has_all_permissions': 'all_permissions' in permissions,
-            'tranzactie_acces': user_db_data.get('tranzactie_acces', 'toate'),
-            # LINIA CRUCIALĂ CARE ACUM ESTE PREZENTĂ:
-            'force_password_change': user_db_data.get('parola_schimbata_necesar')
-        }
-        # --- SFÂRȘIT BLOC ---
-        
-        self.db_handler.log_action(user_id, username, "Login reușit")
-        return True
+            user_id = user_db_data['id']
+            permissions = self.db_handler.get_user_permissions(user_id)
+            
+            # --- LINIA DE DEPANARE DE ADĂUGAT ---
+            print(f"DEBUG: Permisiuni încărcate pentru user ID {user_id}: {permissions}")
+            # --- SFÂRȘIT LINIE DE DEPANARE ---
+            
+            allowed_accounts = self.db_handler.get_allowed_accounts_for_user(user_id)
+            
+            self.result = {
+                'id': user_id, 'username': username, 'nume_complet': user_db_data.get('nume_complet'),
+                'permissions': permissions, 'allowed_accounts': allowed_accounts,
+                'has_all_permissions': 'all_permissions' in permissions,
+                'tranzactie_acces': user_db_data.get('tranzactie_acces', 'toate'),
+                'force_password_change': user_db_data.get('parola_schimbata_necesar')
+            }
+            
+            self.db_handler.log_action(user_id, username, "Login reușit")
+            return True
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Eroare Necunoscută la Autentificare", f"A apărut o problemă neașteptată:\n\n{type(e).__name__}: {e}", parent=self)
+            return False
 
     def apply(self):
         pass # Nu este necesar, validarea face totul

@@ -1,59 +1,54 @@
-# auth_handler.py
+# src/common/auth_handler.py - VERSIUNE FINALĂ ȘI CORECTĂ
+
 import hashlib
 import os
 import logging
 import hmac
 
-# Constante pentru hashing - MODIFICATE PENTRU CORECTITUDINE
-HASH_NAME = 'sha256'      # Algoritmul de hash care va fi folosit de PBKDF2
-HASH_ITERATIONS = 390000  # Am crescut numărul de iterații pentru securitate sporită (recomandat de OWASP în 2023)
-HASH_SALT_SIZE = 16       # Dimensiunea salt-ului în bytes
+# Constante de securitate
+HASH_SALT_SIZE = 16
+HASH_NAME = 'sha256'
+HASH_ITERATIONS = 390000
 
 def hash_parola(parola: str) -> tuple[str, str]:
     """
-    Generează un salt aleatoriu și criptează parola folosind PBKDF2.
-    
-    Returnează:
-        Un tuplu conținând (salt-ul în format hex, hash-ul parolei în format hex).
+    Generează un hash securizat pentru o parolă, folosind un salt aleatoriu.
+    Returnează un tuplu (salt_hex, hash_hex).
     """
     salt = os.urandom(HASH_SALT_SIZE)
-    # Apelul funcției a fost CORECTAT - are 5 argumente
     hash_derivat = hashlib.pbkdf2_hmac(
-        HASH_NAME,                 # 1. Numele algoritmului de hash
-        parola.encode('utf-8'),    # 2. Parola
-        salt,                      # 3. Salt-ul
-        HASH_ITERATIONS,           # 4. Numărul de iterații
-        dklen=None                 # 5. Lungimea cheii (se folosește default)
+        HASH_NAME,
+        parola.encode('utf-8'),
+        salt,
+        HASH_ITERATIONS
     )
     return salt.hex(), hash_derivat.hex()
 
 def verifica_parola(parola_introdusa: str, salt_hex: str, hash_stocat_hex: str) -> bool:
     """
-    Verifică dacă o parolă introdusă corespunde cu hash-ul stocat.
-    
-    Args:
-        parola_introdusa: Parola în clar, introdusă de utilizator.
-        salt_hex: Salt-ul stocat (în format hex) asociat cu utilizatorul.
-        hash_stocat_hex: Hash-ul parolei stocat (în format hex).
-
-    Returnează:
-        True dacă parola este corectă, False altfel.
+    Verifică o parolă introdusă comparând-o cu hash-ul și sarea stocate.
+    Acceptă sarea și hash-ul ca argumente separate.
+    Returnează True dacă parola este corectă, altfel False.
     """
     try:
+        # Verificăm dacă salt-ul și hash-ul stocat sunt valide, altfel returnăm False direct.
+        if not salt_hex or not hash_stocat_hex:
+            logging.error("Sarea (salt) sau hash-ul stocat sunt goale.")
+            return False
+        
         salt = bytes.fromhex(salt_hex)
         hash_stocat = bytes.fromhex(hash_stocat_hex)
-    except (ValueError, TypeError):
-        logging.error("Salt-ul sau hash-ul stocat nu este într-un format hex valid.")
+    except (ValueError, TypeError) as e:
+        logging.error(f"Sarea (salt) sau hash-ul stocat nu este într-un format hex valid: {e}")
         return False
 
-    # Apelul funcției a fost CORECTAT
+    # Generăm un nou hash folosind parola introdusă și sarea stocată
     hash_nou_derivat = hashlib.pbkdf2_hmac(
         HASH_NAME,
         parola_introdusa.encode('utf-8'),
         salt,
-        HASH_ITERATIONS,
-        dklen=None
+        HASH_ITERATIONS
     )
     
-    # Comparație sigură, rezistentă la "timing attacks"
+    # Comparăm în mod sigur cele două hash-uri pentru a preveni atacurile de tip "timing"
     return hmac.compare_digest(hash_nou_derivat, hash_stocat)

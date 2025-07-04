@@ -111,34 +111,45 @@ class SessionManager:
                 flags = subprocess.DETACHED_PROCESS
 
             command = []
-            if app_type == 'chat':
-                if is_frozen:
-                    app_path = os.path.join(os.path.dirname(sys.executable), 'BTExtrasChat', 'BTExtrasChat.exe')
+            
+            # --- BLOC DE COD MODIFICAT PENTRU CORECTAREA CĂII FINALE ---
+            if is_frozen:
+                # Calea de bază este directorul unde se află executabilul Session Manager.
+                # Aceasta este calea corectă atât în 'dist', cât și după instalare.
+                base_path = os.path.dirname(sys.executable)
+                
+                if app_type == 'chat':
+                    app_path = os.path.join(base_path, 'BTExtrasChat', 'BTExtrasChat.exe')
                     command = [app_path]
-                else:
+                elif app_type == 'viewer':
+                    app_path = os.path.join(base_path, 'BTExtrasViewer', 'BTExtrasViewer.exe')
+                    command = [app_path]
+            else: # Logica pentru rularea din sursă
+                if app_type == 'chat':
                     command = [sys.executable, '-m', 'BTExtrasChat.chat_main']
-                
-                if self.current_session_user:
-                    user_data_json = json.dumps(self.current_session_user)
-                    user_data_b64 = base64.b64encode(user_data_json.encode('utf-8')).decode('utf-8')
-                    command.append(f'--user-data={user_data_b64}')
-                
-                process = subprocess.Popen(command, creationflags=flags)
-                self.chat_pid = process.pid # Stocăm PID-ul
-                print(f"INFO: Chat lansat cu PID: {self.chat_pid}")
-
-            elif app_type == 'viewer':
-                if is_frozen:
-                    app_path = os.path.join(os.path.dirname(sys.executable), 'BTExtrasViewer', 'btextrasviewer.exe')
-                    command = [app_path]
-                else:
+                elif app_type == 'viewer':
                     command = [sys.executable, '-m', 'BTExtrasViewer.btextrasviewer_main']
-                
+            # --- SFÂRȘIT BLOC MODIFICAT ---
+            
+            if app_type == 'chat' and self.current_session_user:
+                user_data_json = json.dumps(self.current_session_user)
+                user_data_b64 = base64.b64encode(user_data_json.encode('utf-8')).decode('utf-8')
+                command.append(f'--user-data={user_data_b64}')
+            
+            if command:
                 process = subprocess.Popen(command, creationflags=flags)
-                self.viewer_pid = process.pid # Stocăm PID-ul
-                print(f"INFO: Viewer lansat cu PID: {self.viewer_pid}")
+                if app_type == 'chat':
+                    self.chat_pid = process.pid
+                elif app_type == 'viewer':
+                    self.viewer_pid = process.pid
+            else:
+                print(f"EROARE: Tip de aplicație necunoscut: '{app_type}'")
 
+        except FileNotFoundError:
+            app_path_for_error = ' '.join(command) if command else 'N/A'
+            messagebox.showerror("Eroare Lansare", f"Executabilul pentru '{app_type}' nu a fost găsit.\n\nCale căutată: {app_path_for_error}")
         except Exception as e:
+            messagebox.showerror("Eroare Lansare", f"EROARE la lansarea '{app_type}':\n\n{type(e).__name__}: {e}")
             print(f"EROARE la lansarea '{app_type}': {e}")
 
     def quit_all(self, icon=None, item=None):

@@ -857,10 +857,11 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
         if self.canvas:
             self.canvas.mpl_connect('motion_notify_event', self._on_mouse_hover)
         
-        # Populăm filtrele și pornim actualizarea
+        # --- BLOCUL CRUCIAL CARE RESTAUREAZĂ FUNCȚIONALITATEA ---
         self._populate_filters_with_initial_context()
-        self._setup_bindings()
-        self._schedule_report_update()
+        self._setup_bindings() # Asigurăm legarea evenimentelor
+        self._schedule_report_update() # Pornim prima actualizare
+        # --- SFÂRȘIT BLOC ---
 
         self.center_window()
         self.grab_set()
@@ -995,10 +996,13 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
         self._update_job = self.after(400, self._refresh_report_data)
 
     def _setup_bindings(self):
+        """Leagă evenimentele widget-urilor de funcția de actualizare."""
         self.start_date_entry.bind("<<DateEntrySelected>>", self._schedule_report_update)
         self.end_date_entry.bind("<<DateEntrySelected>>", self._schedule_report_update)
         self.granularity_combo.bind("<<ComboboxSelected>>", self._schedule_report_update)
         self.type_combo.bind("<<ComboboxSelected>>", self._schedule_report_update)
+        # Checkbutton-urile își apelează funcția direct prin parametrul 'command',
+        # deci nu au nevoie de .bind() aici.
 
     def _on_mouse_hover(self, event):
         """Metoda finală și robustă pentru gestionarea tooltip-urilor pe grafic."""
