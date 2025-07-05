@@ -19,7 +19,7 @@ import base64
 import argparse
 import time
 
-
+from BTExtrasViewer.ui_help import HelpDialog # Adăugați această linie
 from common.app_constants import CHAT_COMMAND_PORT, VIEWER_COMMAND_PORT, SESSION_COMMAND_PORT, VIEWER_LOCK_PORT
 
 
@@ -71,90 +71,80 @@ def notify_session_manager(user_data):
 
 class BTViewerApp:
     def __init__(self, master, user_data, db_handler, user_settings):
-        # --- Constructor modificat și corectat ---
+        # 1. Setup principal (master, utilizator, db, setări)
         self.master = master
-
-        self.last_normal_geometry = {}  # Variabilă nouă pentru a stoca ultima geometrie
-        self.master.bind('<Configure>', self._on_configure) # Legăm evenimentul de o funcție nouă
-
         self.current_user = user_data
         self.db_handler = db_handler
-        # NOU: Setările sunt primite ca parametru, nu citite dintr-un fișier
-        self.user_settings = user_settings 
-        
-        # Varianta nouă și corectă de aplicare a setărilor
-        window_settings = self.user_settings.get('window', {})
+        self.user_settings = user_settings
 
-        # Verificăm mai întâi dacă trebuie să maximizăm fereastra
+        # 2. Gestionarea ferestrei și a stării UI
+        self.last_normal_geometry = {}
+        self.master.bind('<Configure>', self._on_configure)
+        self._programmatic_change = False
+        self._applying_nav_selection = False
+        self._prevent_on_account_selected_trigger = False
+
+        # Aplicarea geometriei salvate
+        window_settings = self.user_settings.get('window', {})
         if window_settings.get('state') == 'zoomed':
             self.master.state('zoomed')
-        # Altfel, dacă era în stare normală, aplicăm geometria salvată
         elif window_settings.get('state') == 'normal':
             try:
                 width = int(window_settings.get('width', 1200))
                 height = int(window_settings.get('height', 800))
                 x = int(window_settings.get('x', 100))
                 y = int(window_settings.get('y', 100))
-
                 screen_width = self.master.winfo_screenwidth()
                 screen_height = self.master.winfo_screenheight()
                 if x + width < 0 or x > screen_width: x = 100
                 if y + height < 0 or y > screen_height: y = 100
-
                 self.master.geometry(f'{width}x{height}+{x}+{y}')
             except (ValueError, TypeError):
                 self.master.geometry('1200x800')
-        # Dacă nu există nicio setare, folosim dimensiunea implicită
         else:
             self.master.geometry('1200x800')
 
         self.master.title(f"{APP_NAME} - Se încarcă datele...")
 
-        # Inițializarea atributelor aplicației
-        self.visible_tx_codes = [] 
-        self._programmatic_change = False 
-        self.import_batch_queue = [] 
-        self.current_batch_info_for_message = None
-        self.file_paths_for_import_ref = [] 
-        
-        # NOU: Setările SMTP sunt încărcate din setările utilizatorului
-        self.smtp_config = self.user_settings.get('smtp', {})
-        
-        self._applying_nav_selection = False
-        self._prevent_on_account_selected_trigger = False
-        
+        # 3. Starea datelor (conturi, tranzacții, sortare)
         self.active_account_id = None
-        self.accounts_list = [] 
+        self.accounts_list = []
         self.account_combo_var = tk.StringVar()
         self.sort_column = 'data'
         self.sort_direction = 'DESC'
         self.total_transaction_count = 0
+        self.visible_tx_codes = []
+
+        # 4. Starea filtrelor și navigării
         self.search_job = None
-        
-        self.month_map_for_nav = MONTH_MAP_FOR_NAV
-        self.reverse_month_map_for_nav = REVERSE_MONTH_MAP_FOR_NAV
-        
-        # Atributele de filtre sunt setate acum de _apply_user_settings
         self.search_var = tk.StringVar()
         self.search_column_var = tk.StringVar()
         self.type_var = tk.StringVar()
         self.date_range_mode_var = tk.BooleanVar()
         self.exact_search_var = tk.BooleanVar(value=False)
-        
         self.nav_selected_year, self.nav_selected_month_index, self.nav_selected_day = None, 0, 0
         self._nav_select_job, self._current_processed_nav_iid = None, None
-        
-        self.treeview_display_columns = DEFAULT_TREEVIEW_DISPLAY_COLUMNS
-        # Lățimile coloanelor vor fi setate de _apply_user_settings
-        self.loaded_column_widths = self.user_settings.get('column_widths', {})
-        
+
+        # 5. Starea proceselor de fundal (import/export)
+        self.import_batch_queue = []
+        self.current_batch_info_for_message = None
+        self.file_paths_for_import_ref = []
+        self.last_imported_account_id = None
+        self.queue = Queue()
+        self.import_thread = None
+        self.export_thread = None
         self.current_progress_win = None
         self.current_progress_bar = None
         self.current_progress_status_label_widget = None
-        self.queue = Queue() 
-        self.import_thread = None 
-        self.export_thread = None 
+
+        # 6. Setări și constante
+        self.smtp_config = self.user_settings.get('smtp', {})
+        self.month_map_for_nav = MONTH_MAP_FOR_NAV
+        self.reverse_month_map_for_nav = REVERSE_MONTH_MAP_FOR_NAV
+        self.treeview_display_columns = DEFAULT_TREEVIEW_DISPLAY_COLUMNS
+        self.loaded_column_widths = self.user_settings.get('column_widths', {})
         
+        # 7. Inițializare widget-uri (vor fi create în setup_ui)
         self.status_label = None
         self.account_selector_combo = None
         self.active_account_color_indicator = None
@@ -167,22 +157,18 @@ class BTViewerApp:
         self.reset_button = None
         self.export_button = None
         self.import_button = None
+        self.chat_button = None
         self.action_buttons = []
         self.nav_tree = None
         self.tree = None
 
-        # Construim interfața grafică
+        # 8. Construcție și populare UI
         self.setup_ui()
-        
-        # Aplicăm setările încărcate din DB
         self._apply_user_settings()
-        
         logging.debug("DEBUG_INIT: __init__ - UI setup complet. Se pornește popularea UI.")
-        
-        # Pornim popularea UI
         self.init_step4_populate_ui()
 
-        # Pornim serverul de comenzi
+        # 9. Pornire listener de comenzi
         self.command_server_thread = threading.Thread(target=self._listen_for_commands, daemon=True)
         self.command_server_thread.start()
 
@@ -196,6 +182,33 @@ class BTViewerApp:
                 'x': self.master.winfo_x(),
                 'y': self.master.winfo_y()
             }
+
+    def _show_help_dialog(self, initial_tab_name=None):
+        """Deschide fereastra de ajutor, opțional la un tab specific."""
+        tab_map = {
+            "Introducere": 0, "Interfața Principală": 1, "Import & Export": 2, 
+            "Rapoarte": 3, "Utilizatori și Roluri": 4, "Chat & Comenzi Rapide": 5, 
+            "Despre": 6
+        }
+        initial_index = tab_map.get(initial_tab_name, 0)
+        HelpDialog(self.master, initial_tab=initial_index)
+
+    def _refresh_application_data(self, refresh_accounts=False, refresh_transactions=True):
+        """
+        Funcție centralizată pentru a reîmprospăta datele aplicației din baza de date.
+        
+        :param refresh_accounts: Dacă este True, reîncarcă lista de conturi.
+        :param refresh_transactions: Dacă este True, reîncarcă arborele și lista de tranzacții.
+        """
+        if refresh_accounts:
+            # Reîncarcă lista de conturi permise pentru utilizator
+            self.user_accounts = self.db_handler.get_user_allowed_accounts(self.current_user['id'])
+            # Repopulează combobox-ul cu noile date
+            self._populate_accounts_combobox()
+
+        if refresh_transactions and self.current_account_id:
+            # Reîmprospătează arborele de navigare și lista de tranzacții pentru contul curent
+            self._refresh_tree_and_transactions()
 
     def _launch_or_show_chat(self):
         """
@@ -839,6 +852,14 @@ class BTViewerApp:
             if self.has_permission('run_report_transaction_analysis'):
                 reports_menu.add_command(label="Analiză Detaliată Tranzacții...", command=self.show_transaction_analysis_report)
     
+        # === START BLOC MENIU HELP ===
+        help_menu = tk.Menu(menubar, tearoff=0, font=(default_font_family, default_font_size))
+        menubar.add_cascade(label="Ajutor", menu=help_menu)
+        help_menu.add_command(label="Afișează Ajutor...", command=self._show_help_dialog)
+        help_menu.add_separator()
+        help_menu.add_command(label="Despre BTExtras Suite...", command=lambda: self._show_help_dialog(initial_tab_name="Despre"))
+        # === SFÂRȘIT BLOC MENIU HELP ===
+
     def _on_account_selected(self, event=None):
         if self._prevent_on_account_selected_trigger: return
 
@@ -848,9 +869,10 @@ class BTViewerApp:
         if selected_account_obj:
             if self.active_account_id != selected_account_obj['id_cont']: 
                 self.active_account_id = selected_account_obj['id_cont']
-                config_management.save_app_config(self) 
+                save_app_config(self) 
                 self.refresh_ui_for_account_change()
             else:
+                # Chiar dacă e același cont, un refresh poate fi util
                 self.refresh_ui_for_account_change()
         else:
             self.active_account_id = None 
@@ -859,14 +881,30 @@ class BTViewerApp:
                 messagebox.showwarning("Selecție Cont Invalidă", "Contul selectat nu este valid.", parent=self.master)
 
     def refresh_ui_for_account_change(self):
-        if not self.master.winfo_exists(): return
+        """
+        Reîmprospătează complet UI-ul (arbore, tranzacții, etc.) pentru contul activ.
+        Forțează o verificare a conexiunii DB înainte de a executa interogări.
+        """
+        # === MODIFICAREA CHEIE: Verificăm și restabilim conexiunea dacă este necesar ===
+        if not self.db_handler.is_connected():
+            messagebox.showwarning("Conexiune Restaurată", 
+                                "Conexiunea la baza de date a fost inactivă și a fost restaurată automat. "
+                                "Vă rugăm reîncercați ultima acțiune.", parent=self.master)
+            # Actualizăm și starea vizuală a selectorului de conturi
+            self._populate_account_selector()
+            return
+        # === SFÂRȘIT MODIFICARE CHEIE ===
 
+        if not self.master.winfo_exists():
+            return
+
+        # Restul logicii de reîmprospătare rămâne neschimbată
         self._load_visible_transaction_types()
-        self.update_total_count() 
-        self._populate_nav_tree() 
-        self.reset_filters() 
+        self.update_total_count()
+        self._populate_nav_tree()
+        self.reset_filters()
         self._update_status_label()
-        self._update_active_account_color_indicator() 
+        self._update_active_account_color_indicator()
 
     def _update_active_account_color_indicator(self):
         if not (hasattr(self, 'active_account_color_indicator') and self.active_account_color_indicator.winfo_exists()):
@@ -919,17 +957,22 @@ class BTViewerApp:
             self.status_label.config(text=db_info_part + account_info_part + transaction_count_part)
 
     def _populate_account_selector(self):
-        if not (self.db_handler and self.db_handler.is_connected()):
-            if hasattr(self, 'account_selector_combo') and self.account_selector_combo.winfo_exists():
-                self.account_selector_combo.config(values=[])
-                self.account_combo_var.set("Fără Conexiune DB")
-                self.account_selector_combo.config(state="disabled")
-            self.active_account_id = None
-            self.accounts_list = []
-            if self.master.winfo_exists(): self.master.after(50, self.refresh_ui_for_account_change)
-            return
-
+        """
+        Populează combobox-ul de conturi. Folosește un flag pentru a preveni
+        declanșarea accidentală a evenimentului de selecție.
+        """
+        # Setăm flag-ul pentru a bloca evenimentul de selecție
+        self._prevent_on_account_selected_trigger = True
         try:
+            if not (self.db_handler and self.db_handler.is_connected()):
+                if hasattr(self, 'account_selector_combo') and self.account_selector_combo.winfo_exists():
+                    self.account_selector_combo.config(values=[])
+                    self.account_combo_var.set("Fără Conexiune DB")
+                    self.account_selector_combo.config(state="disabled")
+                self.active_account_id = None
+                self.accounts_list = []
+                return
+
             all_db_accounts = self.db_handler.get_all_accounts() or []
             
             if self.current_user['has_all_permissions']:
@@ -940,51 +983,34 @@ class BTViewerApp:
             
             account_names = [acc['nume_cont'] for acc in self.accounts_list]
             
-            # === BLOC DE COD CORECTAT ===
-            # Citim ultimul ID activ din user_settings, nu din self.config
-            general_settings = self.user_settings.get('general', {})
-            last_active_id_str_from_db = general_settings.get('active_account_id')
-            # ============================
-            
-            last_active_id_from_db = None
-            if last_active_id_str_from_db and last_active_id_str_from_db.isdigit():
-                try: last_active_id_from_db = int(last_active_id_str_from_db)
-                except ValueError: pass
+            # Determinăm ce cont ar trebui să fie activ
+            determined_active_id = self.active_account_id  # Păstrăm contul activ curent
             
             if hasattr(self, 'account_selector_combo') and self.account_selector_combo.winfo_exists():
                 self.account_selector_combo.config(values=account_names)
-                determined_active_id, determined_active_name = None, None
-
+                
                 if not account_names:
-                    determined_active_name = "Niciun Cont Accesibil"
+                    self.account_combo_var.set("Niciun Cont Accesibil")
                     self.account_selector_combo.config(state="disabled")
+                    self.active_account_id = None
                 else:
                     self.account_selector_combo.config(state="readonly")
-                    if last_active_id_from_db is not None:
-                        acc_from_config = next((acc for acc in self.accounts_list if acc['id_cont'] == last_active_id_from_db), None)
-                        if acc_from_config:
-                            determined_active_id = acc_from_config['id_cont']
-                            determined_active_name = acc_from_config['nume_cont']
-                    
-                    # Am eliminat o verificare redundantă pentru a simplifica logica
-                    if determined_active_id is None and self.accounts_list:
-                        determined_active_id = self.accounts_list[0]['id_cont']
-                        determined_active_name = self.accounts_list[0]['nume_cont']
-                
-                self.active_account_id = determined_active_id
-                self.account_combo_var.set(determined_active_name if determined_active_name else "Selectați Cont")
-            else:
-                self.active_account_id = self.accounts_list[0]['id_cont'] if self.accounts_list else None
-        
-        except Exception as e:
-            if self.master.winfo_exists(): messagebox.showerror("Eroare Încărcare Conturi", f"Eroare: {e}", parent=self.master)
-            self.active_account_id = None; self.accounts_list = []
-            if hasattr(self, 'account_selector_combo') and self.account_selector_combo.winfo_exists():
-                self.account_selector_combo.config(values=[]); self.account_combo_var.set("Eroare"); self.account_selector_combo.config(state="disabled")
-        
-        # Salvăm configurația la ieșire, nu la fiecare populare
-        # config_management.save_app_config(self) <-- Am comentat această linie pentru a preveni erori în cascadă la pornire
-        if self.master.winfo_exists(): self.master.after(50, self.refresh_ui_for_account_change)
+                    # Verificăm dacă contul activ curent mai este valid
+                    active_account_obj = next((acc for acc in self.accounts_list if acc['id_cont'] == determined_active_id), None)
+                    if active_account_obj:
+                        # Contul activ este valid, îl setăm în combobox
+                        self.account_combo_var.set(active_account_obj['nume_cont'])
+                    elif self.accounts_list:
+                        # Contul activ nu mai e valid (ex: a fost șters), selectăm primul din listă
+                        self.active_account_id = self.accounts_list[0]['id_cont']
+                        self.account_combo_var.set(self.accounts_list[0]['nume_cont'])
+                    else:
+                        # Niciun cont în listă
+                        self.account_combo_var.set("Selectați Cont")
+                        self.active_account_id = None
+        finally:
+            # Indiferent de ce se întâmplă, deblocăm evenimentul de selecție la final
+            self.master.after(50, lambda: setattr(self, '_prevent_on_account_selected_trigger', False))
 
     def manage_accounts(self):
         if not (self.db_handler and self.db_handler.is_connected()):
@@ -1069,7 +1095,6 @@ class BTViewerApp:
         parent_window.wait_window(dialog)
         return result_id
 
-
     def import_mt940(self):
         if not (self.db_handler and self.db_handler.is_connected()):
             if self.master.winfo_exists():
@@ -1083,154 +1108,127 @@ class BTViewerApp:
         )
         if not selected_file_paths:
             return
-        
-        self.file_paths_for_import_ref = selected_file_paths
-        self.import_batch_queue = []
-        temp_account_to_files_map = {} 
+
+        # --- START VERSIUNE FINALĂ ȘI OPTIMIZATĂ ---
+
+        # Pasul 1: Pregătirea datelor FĂRĂ a modifica starea aplicației
+        temp_account_to_files_map = {}
+        accounts_snapshot = self.db_handler.get_all_accounts() or []
 
         for file_path in selected_file_paths:
-            current_ui_active_account_id = self.active_account_id
-            current_ui_active_account_iban, current_ui_active_account_name = None, "N/A"
-            if current_ui_active_account_id:
-                acc_obj = next((acc for acc in self.accounts_list if acc['id_cont'] == current_ui_active_account_id), None)
-                if acc_obj:
-                    current_ui_active_account_iban = acc_obj.get('iban')
-                    current_ui_active_account_name = acc_obj.get('nume_cont')
-            
+            target_account_id = None
             iban_from_file_raw = extract_iban_from_mt940(file_path)
             iban_from_file = iban_from_file_raw.replace(" ", "").upper() if iban_from_file_raw else None
-            
-            target_account_id_for_this_file = None
 
-            if not iban_from_file:
-                prompt_msg = (f"Nu s-a putut extrage un IBAN valid din fișierul:\n'{os.path.basename(file_path)}'.\n\n"
-                              "Vă rugăm selectați din lista de mai jos contul în care doriți să importați acest fișier:")
-                chosen_id = self._ask_user_to_select_account_for_import(self.master, prompt_msg)
-                if chosen_id:
-                    target_account_id_for_this_file = chosen_id
-                    if self.active_account_id != chosen_id:
-                        chosen_account_obj = next((acc for acc in self.accounts_list if acc['id_cont'] == chosen_id), None)
-                        if chosen_account_obj:
-                            self._prevent_on_account_selected_trigger = True
-                            self.active_account_id = chosen_id
-                            self.account_combo_var.set(chosen_account_obj['nume_cont'])
-                            config_management.save_app_config(self)
-                            self._prevent_on_account_selected_trigger = False
+            if iban_from_file:
+                # Fișierul are IBAN, încercăm să găsim o potrivire
+                account_match = next((acc for acc in accounts_snapshot if acc.get('iban') and acc['iban'].replace(" ", "").upper() == iban_from_file), None)
+                
+                if account_match:
+                    # === MODIFICARE CHEIE ===
+                    # Am găsit contul, îl asociem automat, FĂRĂ a mai întreba utilizatorul.
+                    target_account_id = account_match['id_cont']
                 else:
-                    continue 
-            
-            else: 
-                normalized_iban_current_ui_active = current_ui_active_account_iban.replace(" ", "").upper() if current_ui_active_account_iban else None
-                if normalized_iban_current_ui_active and iban_from_file == normalized_iban_current_ui_active:
-                    target_account_id_for_this_file = current_ui_active_account_id
-                else: 
-                    account_matching_db = self.db_handler.fetch_one_dict(
-                        "SELECT id_cont, nume_cont, iban FROM conturi_bancare WHERE REPLACE(UPPER(iban), ' ', '') = %s", (iban_from_file,)
-                    )
-                    if account_matching_db:
-                        matched_id, matched_name = account_matching_db['id_cont'], account_matching_db['nume_cont']
-                        
-                        if current_ui_active_account_id and matched_id == current_ui_active_account_id:
-                            target_account_id_for_this_file = current_ui_active_account_id
-                        else:
-                            msg = (f"Fișierul '{os.path.basename(file_path)}' (IBAN: {iban_from_file})\n"
-                                   f"corespunde contului deja înregistrat:\n   Nume: {matched_name}\n\n"
-                                   f"Importați tranzacțiile din acest fișier în contul '{matched_name}'?")
-                            if self.master.winfo_exists() and messagebox.askyesno("Confirmare Cont pentru Fișier", msg, parent=self.master):
-                                target_account_id_for_this_file = matched_id
-                                self._prevent_on_account_selected_trigger = True
-                                self.active_account_id = matched_id
-                                self.account_combo_var.set(matched_name)
-                                config_management.save_app_config(self)
-                                self._prevent_on_account_selected_trigger = False
+                    # Nu am găsit contul, întrebăm dacă se creează unul nou
+                    msg = (f"Fișierul '{os.path.basename(file_path)}' conține un IBAN nou:\n{iban_from_file}\n\n"
+                        "Doriți să creați acum un cont nou pentru acest IBAN?")
+                    if messagebox.askyesno("Cont Nou Detectat", msg, parent=self.master, icon='question'):
+                        dialog = AccountEditDialog(self.master, self.db_handler, account_data={'iban': iban_from_file_raw}, title=f"Adaugă Cont Nou")
+                        if dialog.result:
+                            res = dialog.result
+                            sql_ins = "INSERT INTO conturi_bancare (nume_cont, iban, nume_banca, valuta, observatii_cont, culoare_cont) VALUES (%s,%s,%s,%s,%s,%s)"
+                            params_ins = (res['nume_cont'],res['iban'],res['nume_banca'],res['valuta'],res['observatii_cont'], res.get('culoare_cont', '#FFFFFF'))
+                            if self.db_handler.execute_commit(sql_ins, params_ins):
+                                new_id = self.db_handler.fetch_scalar("SELECT LAST_INSERT_ID()")
+                                target_account_id = new_id
+                                accounts_snapshot.append({'id_cont': new_id, 'nume_cont': res['nume_cont'], 'iban': res['iban']})
                             else:
-                                continue 
-                    else:
-                        msg = (f"Fișierul '{os.path.basename(file_path)}' (IBAN: {iban_from_file})\n"
-                               f"NU este înregistrat în aplicație.\n\nOpțiuni:\n"
-                               "1. Adăugați cont nou pentru acest IBAN (Apăsați 'Da').\n"
-                               "2. Selectați manual un alt cont existent (Apăsați 'Nu').\n"
-                               "3. Anulați pentru acest fișier (Apăsați 'Anulează').")
-                        user_choice = messagebox.askyesnocancel(f"Cont Nou Detectat pentru {os.path.basename(file_path)}", msg, parent=self.master, icon='question')
+                                messagebox.showerror("Eroare DB", "Nu s-a putut crea noul cont.", parent=self.master)
+                                continue
+            else:
+                # Fișierul nu are IBAN, întrebăm utilizatorul
+                prompt_msg = (f"Nu s-a putut extrage un IBAN valid din fișierul:\n'{os.path.basename(file_path)}'.\n\n"
+                            "Vă rugăm selectați din lista de mai jos contul în care doriți să importați acest fișier:")
+                target_account_id = self._ask_user_to_select_account_for_import(self.master, prompt_msg)
 
-                        if user_choice is True:
-                            dialog = AccountEditDialog(self.master, self.db_handler, account_data={'iban': iban_from_file_raw}, title=f"Adaugă Cont pentru {os.path.basename(file_path)}")
-                            if dialog.result:
-                                try:
-                                    res = dialog.result
-                                    sql_ins = "INSERT INTO conturi_bancare (nume_cont, iban, nume_banca, valuta, observatii_cont, culoare_cont) VALUES (%s,%s,%s,%s,%s,%s)"
-                                    params_ins = (res['nume_cont'],res['iban'],res['nume_banca'],res['valuta'],res['observatii_cont'], res.get('culoare_cont', '#FFFFFF'))
-                                    if self.db_handler.execute_commit(sql_ins, params_ins):
-                                        new_id = self.db_handler.fetch_scalar("SELECT LAST_INSERT_ID()")
-                                        if new_id: 
-                                            target_account_id_for_this_file=new_id
-                                            self._prevent_on_account_selected_trigger=True
-                                            self.active_account_id=new_id
-                                            config_management.save_app_config(self)
-                                            self._prevent_on_account_selected_trigger=False
-                                            self._populate_account_selector()
-                                            acc_o=next((a for a in self.accounts_list if a['id_cont']==new_id),None)
-                                            self.account_combo_var.set(acc_o['nume_cont'] if acc_o else "")
-                                        else: continue
-                                    else: continue
-                                except Exception as e_add_f: continue
-                            else: continue
-                        elif user_choice is False:
-                            prompt_manual = (f"IBAN din '{os.path.basename(file_path)}' ({iban_from_file}) e necunoscut.\nSelectați contul țintă:")
-                            chosen_manual_id = self._ask_user_to_select_account_for_import(self.master, prompt_manual)
-                            if chosen_manual_id: 
-                                target_account_id_for_this_file = chosen_manual_id
-                                if self.active_account_id != chosen_manual_id: 
-                                    acc_m_obj = next((a for a in self.accounts_list if a['id_cont']==chosen_manual_id), None)
-                                    if acc_m_obj: 
-                                        self._prevent_on_account_selected_trigger=True
-                                        self.active_account_id=chosen_manual_id
-                                        self.account_combo_var.set(acc_m_obj['nume_cont'])
-                                        config_management.save_app_config(self)
-                                        self._prevent_on_account_selected_trigger=False
-                            else: continue
-                        else:
-                            continue
-            
-            if target_account_id_for_this_file is not None:
-                if target_account_id_for_this_file not in temp_account_to_files_map: temp_account_to_files_map[target_account_id_for_this_file] = []
-                temp_account_to_files_map[target_account_id_for_this_file].append(file_path)
+            # La finalul logicii pentru un fișier, îl adăugăm în dicționar dacă avem o țintă
+            if target_account_id:
+                if target_account_id not in temp_account_to_files_map:
+                    temp_account_to_files_map[target_account_id] = []
+                temp_account_to_files_map[target_account_id].append(file_path)
 
+        # Pasul 2: Crearea cozii de import
+        self.import_batch_queue = []
         for acc_id, files_list in temp_account_to_files_map.items():
-            if files_list: self.import_batch_queue.append({'target_id': acc_id, 'files': list(files_list)})
+            if files_list:
+                self.import_batch_queue.append({'target_id': acc_id, 'files': list(files_list)})
         
+        # Pasul 3: Pornirea procesării
         if not self.import_batch_queue:
-            if self.master.winfo_exists(): messagebox.showinfo("Import Anulat", "Niciun fișier nu a fost programat pentru import.", parent=self.master)
+            messagebox.showinfo("Import Anulat", "Niciun fișier nu a fost programat pentru import.", parent=self.master)
             return
 
         self._process_next_import_batch()
+        # --- SFÂRȘIT VERSIUNE FINALĂ ---
 
     def _process_next_import_batch(self):
+        """Procesează următorul lot din coada de import."""
         if not self.import_batch_queue:
+            # S-au terminat toate loturile de import
             if self.master.winfo_exists():
                 messagebox.showinfo("Importuri Finalizate", "Toate loturile de fișiere selectate au fost procesate.", parent=self.master)
             self._toggle_action_buttons('normal')
+
+            # Verificăm dacă am avut un cont importat recent
+            if self.last_imported_account_id is not None:
+                # Setăm noul cont activ
+                self.active_account_id = self.last_imported_account_id
+                # Salvăm preferința în baza de date
+                save_app_config(self)
+                # Resetăm variabila de stare
+                self.last_imported_account_id = None
+
+            # Reîmprospătăm complet interfața, în ordinea corectă:
+            # 1. Actualizăm lista de conturi și selecția vizuală
+            self._populate_account_selector()
+            # 2. Actualizăm tranzacțiile pentru noul cont activ
             self.refresh_ui_for_account_change()
             return
 
+        # Procesăm următorul lot din coadă
         current_batch = self.import_batch_queue.pop(0)
         target_id, files_for_this_batch = current_batch['target_id'], current_batch['files']
-        
+
+        # Memorăm ID-ul contului curent ca fiind "ultimul importat"
+        self.last_imported_account_id = target_id
+
         self.current_batch_info_for_message = {'target_id': target_id, 'num_files': len(files_for_this_batch)}
         self.current_batch_files_for_history = files_for_this_batch
 
         acc_obj_batch = next((acc for acc in self.accounts_list if acc['id_cont'] == target_id), None)
         target_name_batch = acc_obj_batch['nume_cont'] if acc_obj_batch else f"ID Cont {target_id}"
-        
+
         self._toggle_action_buttons('disabled')
-        
+
         self.current_progress_win, self.current_progress_bar, self.current_progress_status_label_widget = \
             file_processing.create_progress_window(self.master, f"Import Lot Cont: {target_name_batch}", f"Se procesează {len(files_for_this_batch)} fișier(e)...")
-        
+
         if self.current_progress_bar and self.current_progress_bar.winfo_exists():
             self.current_progress_bar['maximum'] = len(files_for_this_batch)
 
-        self.import_thread = threading.Thread(target=threaded_import_worker, args=(self, files_for_this_batch, self.queue, target_id))
+        # === AICI ESTE BLOCUL DE COD CORECTAT ===
+        
+        # 1. Obținem credențialele pentru baza de date
+        db_creds = self.db_handler.db_credentials
+        
+        # 2. Creăm thread-ul, eliminând linia duplicată și argumentul 'self'
+        self.import_thread = threading.Thread(
+            target=threaded_import_worker, 
+            args=(self, files_for_this_batch, self.queue, target_id, db_creds)
+        )
+        
+        # === SFÂRȘIT BLOC DE COD CORECTAT ===
+
         self.import_thread.daemon = True
         self.import_thread.start()
         if self.master.winfo_exists():

@@ -104,32 +104,29 @@ def create_progress_window(master_ref, title, message):
 
     return progress_win, progress_bar_widget, progress_status_label_widget
 
-def threaded_import_worker(app_instance, file_paths, q_ref, active_account_id_for_import):
+def threaded_import_worker(app_instance, file_paths, q_ref, active_account_id_for_import, db_credentials):
     logging.debug(f"DEBUG_THREAD: Pornit threaded_import_worker. Cont țintă ID: {active_account_id_for_import}")
     inserted, ignored = 0, 0
     thread_conn_local = None
     try:
+        # === AICI ESTE SINGURA MODIFICARE LOGICĂ ===
+        # Am eliminat dependența de `app_instance` și folosim direct `db_credentials`.
+        if not db_credentials:
+            raise ConnectionError("Credentialele DB nu au fost furnizate worker-ului de import.")
+
         if active_account_id_for_import is None:
             raise ValueError("ID-ul contului activ nu a fost furnizat pentru import.")
 
-        # --- ÎNCEPUT BLOC DE COD MODIFICAT ---
-
-        # Verificăm dacă handler-ul și credențialele există
-        if not (hasattr(app_instance, 'db_handler') and app_instance.db_handler.db_credentials):
-             raise ConnectionError("Credentialele DB nu sunt disponibile în instanța aplicației.")
-        
-        # Preluăm și adaptăm parametrii de conexiune pentru PyMySQL
-        conn_params = app_instance.db_handler.db_credentials.copy()
-        conn_params['db'] = conn_params.pop('database', None)       # Renumim 'database' in 'db'
-        conn_params['passwd'] = conn_params.pop('password', None) # Renumim 'password' in 'passwd'
+        # Construim parametrii de conexiune din dicționarul primit
+        conn_params = db_credentials.copy()
+        conn_params['db'] = conn_params.pop('database', None)
+        conn_params['passwd'] = conn_params.pop('password', None)
         conn_params['charset'] = 'utf8mb4'
         
-        # Folosim pymysql.connect pentru a crea conexiunea
+        # Ne conectăm folosind parametrii locali
         thread_conn_local = pymysql.connect(**conn_params)
-        
-        # --- SFÂRȘIT BLOC DE COD MODIFICAT ---
-        
         cursor = thread_conn_local.cursor()
+        # === SFÂRȘITUL MODIFICĂRII LOGICE. RESTUL CODULUI ESTE IDENTIC CU ORIGINALUL. ===
 
         for i, file_path in enumerate(file_paths):
             q_ref.put(("progress", i, f"Procesare: {os.path.basename(file_path)}"))
@@ -199,7 +196,7 @@ def threaded_import_worker(app_instance, file_paths, q_ref, active_account_id_fo
         cursor.close()
         q_ref.put(("done", "import_batch", (inserted, ignored)))
 
-    except pymysql.Error as e: # Prindem excepția specifică PyMySQL
+    except pymysql.Error as e:
         error_message = f"O eroare DB a apărut în timpul importului:\n{type(e).__name__}: {e}"
         logging.error(f"EROARE DB ÎN THREAD-UL DE IMPORT: {e}", exc_info=True)
         if thread_conn_local:

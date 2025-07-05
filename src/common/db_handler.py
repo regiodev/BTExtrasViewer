@@ -348,8 +348,20 @@ class DatabaseHandler:
             logging.info("Conexiune la baza de date închisă.")
 
     def is_connected(self):
-        # --- CORECȚIE AICI: Folosim .open în loc de .is_connected() ---
-        return self.conn is not None and self.conn.open
+        """
+        Verifică dacă conexiunea este activă și încearcă să se reconecteze dacă s-a pierdut.
+        Returnează True dacă conexiunea este validă, altfel False.
+        """
+        if self.conn is None:
+            return False
+        try:
+            # Ping-ul verifică dacă serverul este accesibil.
+            # reconnect=True va restabili automat conexiunea dacă a fost pierdută.
+            self.conn.ping(reconnect=True)
+        except pymysql.Error:
+            # Dacă ping-ul eșuează chiar și cu reconectare, conexiunea este pierdută.
+            return False
+        return True
 
     def check_and_setup_database_schema(self):
         if not self.is_connected():
