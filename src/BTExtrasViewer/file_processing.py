@@ -6,7 +6,7 @@ import tkinter as tk # Necesare pentru create_progress_window
 from tkinter import ttk # Necesare pentru create_progress_window
 # Nu este nevoie de messagebox aici, este folosit în main app
 import pandas as pd
-from openpyxl.styles import Font as ExcelFont, PatternFill, Border, Side
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 import threading
 from queue import Queue, Empty # Queue este folosit, Empty nu neapărat direct de utilizator
@@ -215,47 +215,108 @@ def threaded_import_worker(app_instance, file_paths, q_ref, active_account_id_fo
             thread_conn_local.close()
 
 def threaded_export_worker(app_instance, query_str, query_params, file_path_export, q_ref):
-    """Funcția executată în thread pentru exportul în Excel, folosind SQLAlchemy."""
+    """
+    Funcția executată în thread pentru exportul în Excel.
+    Versiune finală cu formatare profesională și corecție pentru NameError.
+    """
     engine = None
     try:
-
-        # 1. Preluăm credențialele din db_handler, așa cum am corectat anterior
-        if not (hasattr(app_instance, 'db_handler') and app_instance.db_handler.db_credentials):
-             raise ConnectionError("Credentialele DB nu sunt disponibile în instanța aplicației.")
-        creds = app_instance.db_handler.db_credentials
-
-        # 2. Construim un URI (adresă) de conexiune standard
-        # Format: dialect+driver://username:password@host:port/database
-        # Schimbăm driver-ul din 'mysql+mysqlconnector' în 'mysql+pymysql'
-        db_uri = (
-            f"mysql+pymysql://{creds['user']}:{creds['password']}"
-            f"@{creds['host']}:{creds['port']}/{creds['database']}?charset=utf8mb4"
-        )
+        db_creds = app_instance.db_handler.db_credentials
         
-        # 3. Creăm un "motor" de conexiune pe care pandas îl înțelege
+        db_uri = (
+            f"mysql+pymysql://{db_creds['user']}:{db_creds['password']}"
+            f"@{db_creds['host']}:{db_creds['port']}/{db_creds['database']}?charset=utf8mb4"
+        )
         engine = create_engine(db_uri)
 
         q_ref.put(("status", "Se preiau datele din baza de date..."))
-        
-        # 4. Folosim motorul SQLAlchemy direct în pandas. Avertismentul va dispărea.
         df = pd.read_sql_query(query_str, engine, params=query_params)
-        
-        # --- SFÂRȘIT BLOC MODIFICAT ---
+        df.fillna('', inplace=True)
 
-        q_ref.put(("status", "Se scrie fișierul Excel..."))
-        with pd.ExcelWriter(file_path_export, engine='openpyxl') as writer:
+        if 'data' in df.columns:
+            df['data'] = pd.to_datetime(df['data']).dt.date
+        
+        q_ref.put(("status", "Se scrie și se formatează fișierul Excel..."))
+
+        with pd.ExcelWriter(file_path_export, engine='openpyxl', date_format='YYYY-MM-DD') as writer:
             df.to_excel(writer, index=False, sheet_name='Tranzactii')
             ws = writer.sheets['Tranzactii']
-            
-            # ... restul funcției de stilizare (rămâne neschimbată) ...
 
-        # La final, trimite mesajul de succes
+            # Definirea Stilurilor
+            header_font = Font(name='Calibri', size=11, bold=True, color='FFFFFF')
+            header_fill = PatternFill(start_color='4F81BD', fill_type='solid')
+            header_alignment = Alignment(horizontal='center', vertical='center')
+            
+            body_font = Font(name='Calibri', size=11)
+            thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+            
+            credit_fill = PatternFill(start_color='E6F4EA', fill_type='solid')
+            debit_fill = PatternFill(start_color='FDE6E6', fill_type='solid')
+            
+            align_right = Alignment(horizontal='right', vertical='center')
+            align_left_vertical_center = Alignment(horizontal='left', vertical='center')
+
+            try:
+                tip_col_index = df.columns.get_loc('tip') + 1
+            except KeyError:
+                tip_col_index = -1
+
+            # Aplicarea Formatelor
+            for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=ws.max_row), start=1):
+                is_header = (row_idx == 1)
+                
+                row_fill = None
+                if not is_header and tip_col_index != -1:
+                    cell_value = ws.cell(row=row_idx, column=tip_col_index).value
+                    if cell_value == 'credit':
+                        row_fill = credit_fill
+                    elif cell_value == 'debit':
+                        row_fill = debit_fill
+                
+                for cell in row:
+                    cell.border = thin_border
+                    if is_header:
+                        cell.font = header_font
+                        cell.fill = header_fill
+                        cell.alignment = header_alignment
+                    else:
+                        cell.font = body_font
+                        if row_fill:
+                            cell.fill = row_fill
+                        
+                        if isinstance(cell.value, (int, float)):
+                            cell.number_format = '#,##0.00'
+                            cell.alignment = align_right
+                        else:
+                            cell.alignment = align_left_vertical_center
+
+            # Ajustarea Automată a Lățimii Coloanelor
+            for i, column_cells in enumerate(ws.columns, start=1):
+                # Inițializăm cu lungimea header-ului, care este adesea relevantă
+                max_length = len(str(ws.cell(row=1, column=i).value))
+                column_letter = get_column_letter(i)
+                
+                # === AICI ESTE LINIA CORECTATĂ ===
+                # Folosim 'column_cells' (plural), așa cum a fost definit în bucla for
+                for cell in column_cells:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                
+                adjusted_width = (max_length + 2) if max_length < 48 else 50
+                ws.column_dimensions[column_letter].width = adjusted_width
+
+            # Activarea Funcționalităților Avansate
+            ws.freeze_panes = 'A2'
+            ws.auto_filter.ref = ws.dimensions
+
         q_ref.put(("done", "export", file_path_export))
         
     except Exception as e_export:
         logging.error(f"EROARE EXPORT EXCEL: {e_export}", exc_info=True)
         q_ref.put(("error", "export", f"Eroare la exportul în Excel:\n{e_export}"))
     finally:
-        # 5. Eliberăm resursele motorului la final
         if engine:
             engine.dispose()

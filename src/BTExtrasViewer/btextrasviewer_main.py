@@ -2284,50 +2284,73 @@ class BTViewerApp:
 
     def _check_export_progress(self):
         try:
+            # Preluăm mesajul din coadă
             msg = self.queue.get_nowait()
-            msg_type, data = msg[0], msg[1]
+            msg_type = msg[0]
 
-            if msg_type == "status": 
-                if self.current_progress_status_label_widget and self.current_progress_status_label_widget.winfo_exists(): self.current_progress_status_label_widget.config(text=data)
-                if self.master.winfo_exists(): self.master.after(100, self._check_export_progress)
-            elif msg_type == "done": 
+            if msg_type == "status":
+                status_text = msg[1]
+                if self.current_progress_status_label_widget and self.current_progress_status_label_widget.winfo_exists():
+                    self.current_progress_status_label_widget.config(text=status_text)
+                # Continuăm să verificăm coada
+                if self.master.winfo_exists():
+                    self.master.after(100, self._check_export_progress)
+            
+            elif msg_type == "done":
+                # Extragem calea fișierului din mesajul de succes
+                file_path = msg[2]
                 self._toggle_action_buttons('normal')
                 if self.master.winfo_exists():
-                    # Pasăm acum și calea fișierului (data) către funcția de finalizare
-                    self.master.after(10, lambda: self._finalize_export_ui(f"Datele au fost exportate cu succes în:\n{data}", True, file_path=data))
-            elif msg_type == "error": 
+                    message = f"Datele au fost exportate cu succes în:\n{file_path}"
+                    self.master.after(10, lambda: self._finalize_export_ui(message, True, file_path=file_path))
+            
+            elif msg_type == "error":
+                # Extragem mesajul de eroare detaliat
+                error_message = msg[2]
                 self._toggle_action_buttons('normal')
-                if self.master.winfo_exists(): self.master.after(10, lambda: self._finalize_export_ui(data, False))
+                if self.master.winfo_exists():
+                    self.master.after(10, lambda: self._finalize_export_ui(error_message, False))
+                    
         except Empty:
+            # Coada este goală, verificăm dacă thread-ul încă rulează
             if hasattr(self, 'export_thread') and self.export_thread and self.export_thread.is_alive():
-                if self.master.winfo_exists(): self.master.after(100, self._check_export_progress)
+                if self.master.winfo_exists():
+                    self.master.after(100, self._check_export_progress)
             else:
+                # Thread-ul s-a terminat, dar nu am primit mesajul 'done' sau 'error' (caz improbabil)
                 self._toggle_action_buttons('normal')
         except Exception as e:
             logging.error(f"Eroare generală în _check_export_progress: {e}")
-            if self.current_progress_win and self.current_progress_win.winfo_exists(): self.current_progress_win.destroy()
+            if self.current_progress_win and self.current_progress_win.winfo_exists():
+                self.current_progress_win.destroy()
             self._toggle_action_buttons('normal')
 
     def _finalize_export_ui(self, message, success, file_path=None):
         if hasattr(self, 'current_progress_win') and self.current_progress_win:
             try:
                 if self.current_progress_win.winfo_exists():
-                    if self.current_progress_bar and self.current_progress_bar.winfo_exists(): self.current_progress_bar.stop()
+                    if self.current_progress_bar and self.current_progress_bar.winfo_exists():
+                        self.current_progress_bar.stop()
                     self.current_progress_win.destroy()
-            except tk.TclError: pass
+            except tk.TclError:
+                pass
 
-        self.current_progress_win, self.current_progress_bar, self.current_progress_status_label_widget, self.export_thread = None, None, None, None
+        self.current_progress_win = None
+        self.current_progress_bar = None
+        self.current_progress_status_label_widget = None
+        self.export_thread = None
         
         if self.master.winfo_exists():
             if success:
-                # --- BLOC NOU ADAUGAT ---
+                # Înregistrăm acțiunea în jurnal DOAR la succes
                 if file_path and self.db_handler:
                     active_account_name = self.account_combo_var.get()
                     log_details = f"Export pentru contul '{active_account_name}' în fișierul '{os.path.basename(file_path)}'."
                     self.db_handler.log_action(self.current_user['id'], self.current_user['username'], "Export Excel", log_details)
-                # --- SFÂRȘIT BLOC NOU ---
+                
                 messagebox.showinfo("Export Finalizat", message, parent=self.master)
             else:
+                # Afișăm mesajul de eroare detaliat
                 messagebox.showerror("Eroare la Export", message, parent=self.master)
 
     def exit_app(self, message=None):
