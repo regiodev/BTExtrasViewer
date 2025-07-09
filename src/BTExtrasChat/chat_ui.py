@@ -597,34 +597,33 @@ class ChatWindow:
         print(f"INFO: Stare inițială încărcată. Contoare: {self.unread_counts}.")
 
     def _load_conversation_history(self):
-        """
-        Încarcă istoricul de mesaje. Versiune finală, stabilă, care corectează
-        atât contorul de mesaje necitite, cât și afișarea separatorului de dată.
-        """
-        # --- 1. Curățarea interfeței ---
         self.message_display.config(state="normal")
         self.message_display.delete("1.0", tk.END)
-        self.message_status_labels.clear()
         self.line_to_message_map.clear()
 
         if not self.active_conversation_id:
             self.message_display.config(state="disabled")
             return
         
-        messages = self.db_handler.get_messages_for_conversation(self.active_conversation_id)
+        messages = self.db_handler.fetch_all_dict(
+            """
+            SELECT m.id, m.id_expeditor_fk, m.continut_mesaj, m.timestamp, m.stare,
+                   COALESCE(u.nume_complet, u.username) AS expeditor
+            FROM chat_mesaje m
+            JOIN utilizatori u ON m.id_expeditor_fk = u.id
+            WHERE m.id_conversatie_fk = %s ORDER BY m.timestamp ASC
+            """, (self.active_conversation_id,)
+        )
         
-        # --- 2. CORECȚIE REGRESIE CONTOR: Marcare sincronă a mesajelor ca citite ---
         ids_to_mark_as_read = [
             msg['id'] for msg in messages 
             if msg['id_expeditor_fk'] != self.current_user['id'] and msg['stare'] != 'citit'
         ]
+
         if ids_to_mark_as_read:
-            # Se execută actualizarea direct și sincron în baza de date
-            placeholders = ', '.join(['%s'] * len(ids_to_mark_as_read))
-            query = f"UPDATE chat_mesaje SET stare = 'citit' WHERE id IN ({placeholders})"
-            self.db_handler.execute_commit(query, tuple(ids_to_mark_as_read))
+            self._mark_messages_as_read_in_db(ids_to_mark_as_read)
         
-        # Se actualizează contoarele DUPĂ ce baza de date a fost modificată
+        # Actualizăm starea "necitit" înainte de a re-desena lista
         self.unread_counts = self.db_handler.get_unread_message_counts(self.current_user['id'])
         self._populate_conversation_list()
         
@@ -632,51 +631,54 @@ class ChatWindow:
             self.message_display.config(state="disabled")
             return
 
-        # --- 3. Procesarea și afișarea datelor ---
-        display_items = []
+        # --- ÎNCEPUT BLOC MODIFICAT ---
+        # Am combinat logica de afișare a datei și a mesajelor într-o singură buclă
+        # pentru a asigura ordinea corectă a elementelor.
+        
         last_message_date = None
+        active_conv_details = self.conversation_details.get(self.active_conversation_id)
+
         for msg in messages:
+            # Pas 1: Verificăm dacă trebuie să inserăm un separator de dată
             current_message_date = msg['timestamp'].date()
             if current_message_date != last_message_date:
-                display_items.append({'type': 'date_separator', 'date': current_message_date})
+                date_str = current_message_date.strftime('%d %B %Y')
+                # Inserăm separatorul de dată, care este deja configurat să fie centrat
+                self.message_display.insert(tk.END, f"\n{date_str}\n", "date_separator")
                 last_message_date = current_message_date
             
-            display_items.append({'type': 'message', 'data': msg})
-
-        romanian_months = [
-            "Ianuarie", "Februarie", "Martie", "Aprilie", "Mai", "Iunie",
-            "Iulie", "August", "Septembrie", "Octombrie", "Noiembrie", "Decembrie"
-        ]
-
-        for item in display_items:
-            if item['type'] == 'date_separator':
-                # --- 4. CORECȚIE FINALĂ SEPARATOR DATĂ: Metodă robustă ---
-                current_date = item['date']
-                month_name = romanian_months[current_date.month - 1]
-                date_str = f"{current_date.day} {month_name} {current_date.year}"
-                
-                # Inserăm textul cu spațierea necesară (un rând liber înainte, unul după)
-                self.message_display.insert(tk.END, f"\n{date_str}\n")
-                
-                # Obținem indexul liniei pe care tocmai am inserat data.
-                # tk.END este acum la începutul liniei *următoare*.
-                # Deci, linia cu data este linia de dinainte de tk.END.
-                # Scădem 1 din numărul liniei curente de la final.
-                line_of_date = str(int(self.message_display.index(tk.END).split('.')[0]) - 1)
-                
-                # Aplicăm tag-ul de centrare pe întreaga linie, de la caracterul 0 la final.
-                self.message_display.tag_add("date_separator", f"{line_of_date}.0", f"{line_of_date}.end")
-
-            elif item['type'] == 'message':
-                msg_data = item['data']
-                # Actualizăm starea în UI dacă mesajul tocmai a fost marcat ca citit
-                if msg_data['id'] in ids_to_mark_as_read:
-                    msg_data['stare'] = 'citit'
-                self._display_message(msg_data)
-
-        # După ce toate mesajele au fost afișate, forțăm derularea la final.
-        self.message_display.see(tk.END)
+            # Pas 2: Actualizăm starea mesajului în memorie dacă a fost marcat ca citit acum
+            if msg['id'] in ids_to_mark_as_read:
+                msg['stare'] = 'citit'
+            
+            # Pas 3: Replicăm logica din _display_message direct aici
+            is_my_message = msg['id_expeditor_fk'] == self.current_user['id']
+            tag = "sent" if is_my_message else "received"
+            
+            prefix = ""
+            if active_conv_details and active_conv_details['tip_conversatie'] == 'grup' and not is_my_message:
+                sender_name = (msg['expeditor'] or "Utilizator").split(' ')[0]
+                prefix = f"{sender_name}:\n"
+            
+            start_index = self.message_display.index(tk.END)
+            
+            formatted_message = f"{prefix}{msg['continut_mesaj']}"
+            self.message_display.insert(tk.END, formatted_message, tag)
+            
+            if is_my_message and msg['stare'] == 'citit':
+                self.message_display.insert(tk.END, " ✓", "read_receipt")
+            
+            self.message_display.insert(tk.END, "\n\n", "line_spacing")
+            
+            end_index = self.message_display.index(tk.END)
+            start_line = int(start_index.split('.')[0])
+            end_line = int(end_index.split('.')[0])
+            for i in range(start_line, end_line + 1):
+                 self.line_to_message_map[str(i)] = msg
         
+        # --- SFÂRȘIT BLOC MODIFICAT ---
+
+        self.message_display.see(tk.END)
         self.message_display.config(state="disabled")
 
     def _populate_conversation_list(self):
