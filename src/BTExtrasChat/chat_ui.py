@@ -449,7 +449,7 @@ class ChatWindow:
             msg_data = self.line_to_message_map.get(line_start_index)
 
             if msg_data:
-                timestamp_str = msg_data['timestamp'].strftime('%H:%M')
+                timestamp_str = msg_data['timestamp'].strftime('%d %B %Y, %H:%M')
                 self._show_tooltip(timestamp_str, event.x_root + 10, event.y_root + 10)
             else:
                 self._hide_tooltip()
@@ -654,8 +654,7 @@ class ChatWindow:
         # --- SFÂRȘIT BLOC MODIFICAT ---
 
         self.message_display.config(state="disabled")
-        # Am eliminat self.message_display.see(tk.END) de aici, deoarece
-        # este deja apelat în interiorul _display_message.
+        self.message_display.see(tk.END)
 
     def _populate_conversation_list(self):
         """
