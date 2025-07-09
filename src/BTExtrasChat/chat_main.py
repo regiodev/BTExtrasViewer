@@ -27,7 +27,6 @@ def main():
         try:
             user_data_json = base64.b64decode(args.user_data).decode('utf-8')
             pre_authenticated_user = json.loads(user_data_json)
-            print("INFO (Chat): Aplicație pornită cu utilizator pre-autentificat.")
         except Exception as e:
             print(f"EROARE (Chat): Nu s-au putut procesa datele utilizatorului: {e}")
 
@@ -43,7 +42,6 @@ def main():
             config.read(config_management.CONFIG_FILE, encoding='utf-8')
         
         db_credentials = config_management.read_db_config_from_parser(config)
-        
         database = db_handler.DatabaseHandler(db_credentials=db_credentials, app_master_ref=temp_root)
 
         if not database.is_connected() and not database.connect():
@@ -57,7 +55,13 @@ def main():
             else:
                 raise ConnectionError("Configurare DB anulată.")
 
-        database.conn.autocommit = True
+        if not database.check_and_setup_database_schema():
+            raise SystemError("Schema bazei de date nu a putut fi creată sau verificată.")
+
+        # === AICI ESTE CORECȚIA CRITICĂ ===
+        # Am înlocuit atribuirea cu un apel de funcție.
+        database.conn.autocommit(True)
+        # === SFÂRȘIT CORECȚIE ===
         
         user_data = pre_authenticated_user
         if not user_data:
@@ -74,17 +78,12 @@ def main():
 
         if user_data:
             app_root = tk.Tk()
-            # Folosim db_credentials de la început pentru a le pasa mai departe
-            app = ChatWindow(app_root, database, user_data, db_credentials)
+            app = ChatWindow(app_root, database, user_data, database.db_credentials)
             app_root.protocol("WM_DELETE_WINDOW", app.on_closing)
-            
-            # Distrugem fereastra temporară AICI, înainte de a intra în bucla principală
-            if temp_root.winfo_exists():
-                temp_root.destroy()
-            
+            if temp_root.winfo_exists(): temp_root.destroy()
             app_root.mainloop()
 
-    except (ConnectionError, PermissionError) as e:
+    except (ConnectionError, SystemError, PermissionError) as e:
         if 'temp_root' in locals() and temp_root.winfo_exists():
              messagebox.showerror("Eroare Pornire Chat", str(e), parent=temp_root)
         print(f"Pornire eșuată: {e}")
@@ -93,9 +92,6 @@ def main():
         if 'temp_root' in locals() and temp_root.winfo_exists():
             messagebox.showerror("Eroare Critică Chat", f"Eroare neașteptată: {e}", parent=temp_root)
     finally:
-        # --- BLOC MODIFICAT ---
-        # Am eliminat linia care încerca să distrugă temp_root, deoarece este deja distrusă mai sus.
-        # Lăsăm doar închiderea conexiunii la DB.
         if database and database.is_connected():
             database.close_connection()
 

@@ -1,7 +1,7 @@
 # BTExtrasChat/chat_ui.py
 
 import tkinter as tk
-from tkinter import ttk, simpledialog, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, messagebox, Menu, END, Toplevel, Frame, simpledialog, Listbox
 import threading
 import queue
 import time
@@ -12,6 +12,7 @@ import os
 import socket
 import sys
 from common.app_constants import CHAT_COMMAND_PORT
+from common.db_handler import DatabaseHandler, get_new_db_connection
 
 # Am eliminat importurile pentru pystray și PIL
 
@@ -30,8 +31,13 @@ class ChatWindow:
         self.users_list = []
         self.unread_counts = {}
         self.conversation_details = {}
+        
         # Harta pentru a lega indexul din listbox de ID-ul conversației
         self.listbox_map = {}
+        
+        # Inițializăm dicționarul pentru a stoca etichetele de stare ale mesajelor (✓, ✓✓)
+        self.message_status_labels = {}
+        
         # Atributul a fost mutat aici pentru a fi disponibil de la început
         self.line_to_message_map = {}
         
@@ -78,31 +84,48 @@ class ChatWindow:
         self.master.withdraw()
 
     def _listen_for_commands(self):
-        """Ascultă pentru comenzi externe (ex: de la SessionManager)."""
+        """
+        Versiune finală: Apelează _show_window() direct din acest thread
+        pentru a evita orice blocaj al cozii de mesaje sau al buclei 'after'.
+        """
+        server_socket = None
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-                server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                server_socket.bind(('127.0.0.1', CHAT_COMMAND_PORT))
-                server_socket.listen()
-                print(f"INFO: Serverul de comenzi al Chat-ului ascultă pe portul {CHAT_COMMAND_PORT}.")
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server_socket.bind(('127.0.0.1', CHAT_COMMAND_PORT))
+            server_socket.listen(1)
+            print(f"INFO (Chat): Serverul de comenzi ascultă pe portul {CHAT_COMMAND_PORT}.")
 
-                while self.is_running:
-                    try:
-                        server_socket.settimeout(1.0)
-                        conn, addr = server_socket.accept()
-                        with conn:
-                            data = conn.recv(1024)
-                            if data == b'SHOW_WINDOW':
-                                self.message_queue.put('__SHOW_WINDOW__')
-                    except socket.timeout:
-                        continue
+            while self.is_running:
+                conn, addr = server_socket.accept()
+                with conn:
+                    data = conn.recv(1024)
+                    if data == b'SHOW_WINDOW':
+                        print("DEBUG (Chat): Comanda SHOW_WINDOW primită. Se apelează direct _show_window().")
+                        # Apelăm funcția direct, ocolind coada de mesaje.
+                        self._show_window()
+        
+        except OSError as e:
+            if not self.is_running:
+                print("INFO (Chat): Serverul de comenzi s-a oprit.")
+            else:
+                print(f"EROARE CRITICĂ (Chat): Serverul de comenzi a eșuat: {e}")
         except Exception as e:
-            print(f"AVERTISMENT/EROARE în serverul de comenzi al Chat-ului: {e}")
+            print(f"EROARE CRITICĂ (Chat): Eroare neașteptată în serverul de comenzi: {e}")
+        finally:
+            if server_socket:
+                server_socket.close()
 
     def _schedule_user_list_refresh(self):
         """Reîmprospătează periodic lista de utilizatori pentru a actualiza statusul."""
         if self.is_running:
+            # PAS CRITIC ADĂUGAT: Actualizăm contoarele din DB înainte de a redesena.
+            self.unread_counts = self.db_handler.get_unread_message_counts(self.current_user['id'])
+            
+            # Acum redesenăm lista, având garanția că folosim date proaspete.
             self._populate_conversation_list()
+            
+            # Programăm următoarea reîmprospătare.
             self.master.after(20000, self._schedule_user_list_refresh)
 
     def _on_manage_groups(self):
@@ -111,70 +134,66 @@ class ChatWindow:
         self._populate_conversation_list()
 
     def _poll_for_new_messages(self):
-        """Rulează în fundal, caută mesaje noi și trimite heartbeat."""
-        polling_conn = None
-        try:
-            # Stabilește o conexiune la DB specifică pentru acest thread
-            creds = self.db_creds.copy()
-            creds['db'] = creds.pop('database')
-            creds['passwd'] = creds.pop('password')
-            polling_conn = pymysql.connect(**creds, charset='utf8mb4', cursorclass=DictCursor, read_timeout=5, connect_timeout=5)
-            
-            while self.is_running:
-                cursor = None
-                try:
-                    # CORECȚIA 1: Am eliminat argumentul 'dictionary=True'
-                    cursor = polling_conn.cursor()
-                    
-                    # Trimite heartbeat (actualizează 'last_seen')
-                    cursor.execute(
-                        "UPDATE utilizatori SET last_seen = CURRENT_TIMESTAMP WHERE id = %s",
-                        (self.current_user['id'],)
-                    )
-                    polling_conn.commit()
+        """
+        Versiune refactorizată: Acest thread este strict READ-ONLY.
+        Doar citește datele din DB și le pune în coadă pentru a fi procesate
+        de thread-ul principal. Elimină complet riscul de blocare (lock).
+        """
+        connection = get_new_db_connection(self.db_creds)
+        if not connection:
+            print("EROARE CRITICĂ (Chat Polling): Conexiunea DB a eșuat. Thread-ul se oprește.")
+            return
 
-                    # Caută mesaje noi
-                    sql_select_new = """
-                        SELECT
-                            m.id, m.id_conversatie_fk, m.id_expeditor_fk, m.continut_mesaj, m.timestamp, m.stare,
-                            COALESCE(u.nume_complet, u.username) AS expeditor
-                        FROM chat_mesaje m
-                        JOIN chat_participanti p ON m.id_conversatie_fk = p.id_conversatie_fk
-                        JOIN utilizatori u ON m.id_expeditor_fk = u.id
-                        WHERE p.id_utilizator_fk = %s AND m.id_expeditor_fk != %s AND m.stare = 'trimis'
-                    """
-                    cursor.execute(sql_select_new, (self.current_user['id'], self.current_user['id']))
-                    new_messages = cursor.fetchall()
+        my_id = self.current_user['id']
+        try:
+            while self.is_running:
+                try:
+                    connection.ping(reconnect=True)
                     
-                    if new_messages:
-                        ids_to_update = [msg['id'] for msg in new_messages]
-                        placeholders = ','.join(['%s'] * len(ids_to_update))
-                        cursor.execute(
-                            f"UPDATE chat_mesaje SET stare = 'livrat' WHERE id IN ({placeholders})",
-                            tuple(ids_to_update)
-                        )
-                        polling_conn.commit()
+                    with connection.cursor() as cursor:
+                        # 1. Trimitere heartbeat (singura scriere, dar pe tabela utilizatori, nu intră în conflict)
+                        cursor.execute("UPDATE utilizatori SET last_seen = CURRENT_TIMESTAMP WHERE id = %s", (my_id,))
+                        connection.commit() # Commit dedicat doar pentru heartbeat
+
+                        # 2. Căutare mesaje noi pentru mine (READ-ONLY)
+                        sql_new = """
+                            SELECT m.id, m.id_conversatie_fk, m.id_expeditor_fk, m.continut_mesaj, m.timestamp,
+                                COALESCE(u.nume_complet, u.username) AS expeditor
+                            FROM chat_mesaje m
+                            JOIN chat_participanti p ON m.id_conversatie_fk = p.id_conversatie_fk
+                            JOIN utilizatori u ON m.id_expeditor_fk = u.id
+                            WHERE p.id_utilizator_fk = %s AND m.id_expeditor_fk != %s AND m.stare = 'trimis'
+                        """
+                        cursor.execute(sql_new, (my_id, my_id))
+                        new_messages = cursor.fetchall()
+                        if new_messages:
+                            for msg in new_messages:
+                                self.message_queue.put(('new_message', msg))
                         
-                        for msg in new_messages:
-                            self.message_queue.put(msg)
+                        # 3. Căutare actualizări de stare pentru mesajele mele (READ-ONLY)
+                        sql_status = """
+                            SELECT id, id_conversatie_fk, stare 
+                            FROM chat_mesaje 
+                            WHERE id_expeditor_fk = %s AND stare IN ('livrat', 'citit')
+                        """
+                        cursor.execute(sql_status, (my_id,))
+                        status_updates = cursor.fetchall()
+                        if status_updates:
+                            for update in status_updates:
+                                self.message_queue.put(('status_update', update))
 
                 except pymysql.Error as db_err:
-                    print(f"Eroare DB în bucla de polling: {db_err}. Se încearcă reconectarea...")
-                    time.sleep(10)
-                    # CORECȚIA 2: Verificăm conexiunea cu .open și ne reconectăm cu PyMySQL
-                    if not (polling_conn and polling_conn.open):
-                        polling_conn = pymysql.connect(**creds, charset='utf8mb4', cursorclass=DictCursor, read_timeout=5, connect_timeout=5)
-                finally:
-                    if cursor:
-                        cursor.close()
+                    print(f"AVERTISMENT (Chat Polling): Eroare DB, se reîncearcă... Detalii: {db_err}")
+
+                time.sleep(2) # Putem reduce timpul de așteptare la 2 secunde
                 
-                time.sleep(3)
         except Exception as e:
-            print(f"EROARE CRITICĂ în thread-ul de polling: {e}")
+            import traceback
+            print(f"EROARE CRITICĂ în thread-ul de polling al chat-ului: {e}")
+            traceback.print_exc()
         finally:
-            # CORECȚIA 3: Folosim .open pentru a verifica starea conexiunii înainte de a o închide
-            if polling_conn and polling_conn.open:
-                polling_conn.close()
+            if connection:
+                connection.close()
 
     def _quit_application(self):
         """Oprește toate procesele de fundal și închide complet aplicația."""
@@ -190,63 +209,153 @@ class ChatWindow:
 
         self.master.after(100, self.master.destroy)
 
+    def _update_message_status_in_ui(self, message_id, new_status):
+        """Găsește eticheta de status a unui mesaj și îi actualizează textul."""
+        if message_id in self.message_status_labels:
+            status_label = self.message_status_labels[message_id]
+            if status_label.winfo_exists():
+                status_text = ""
+                if new_status == 'livrat':
+                    status_text = "✓"
+                elif new_status == 'citit' or new_status == 'vazut_de_expeditor':
+                    status_text = "✓✓"
+                
+                status_label.config(text=status_text)
+
+    def _update_message_status_in_ui(self, message_id, new_status):
+        """Găsește eticheta de status a unui mesaj și îi actualizează textul."""
+        if message_id in self.message_status_labels:
+            status_label = self.message_status_labels[message_id]
+            if status_label.winfo_exists():
+                status_text = ""
+                if new_status == 'livrat':
+                    status_text = "✓"
+                elif new_status == 'citit' or new_status == 'vazut_de_expeditor':
+                    status_text = "✓✓"
+                
+                status_label.config(text=status_text)
+
     def _process_message_queue(self):
-        """Procesează mesajele și comenzile speciale din coadă."""
-        updated_unread_list = False
+        """
+        Versiune refactorizată: Procesează evenimentele din coadă și este
+        singurul responsabil pentru TOATE operațiunile de scriere în DB,
+        eliminând conflictele și rezolvând problema afișării duplicate.
+        """
         try:
             while not self.message_queue.empty():
-                msg = self.message_queue.get_nowait()
-                
-                if isinstance(msg, str) and msg == '__SHOW_WINDOW__':
-                    print("INFO (Chat): Comanda de afișare fereastră primită în coadă.")
-                    self._show_window()
-                elif isinstance(msg, dict):
-                    if msg['id_conversatie_fk'] == self.active_conversation_id:
-                        self._display_message(msg)
-                    else:
-                        sender_id = msg['id_expeditor_fk']
-                        self.unread_counts[sender_id] = self.unread_counts.get(sender_id, 0) + 1
-                        updated_unread_list = True
-        except queue.Empty:
-            pass
-        finally:
-            if updated_unread_list:
-                self._populate_conversation_list()
-            
-            if self.is_running:
-                self.master.after(200, self._process_message_queue)
+                # Folosim 'get_nowait' pentru a evita blocarea
+                event_type, data = self.message_queue.get_nowait()
 
-    def _display_message(self, msg_data):
-        """Afișează un singur mesaj, adăugând prefix cu numele expeditorului pentru grupurri."""
+                if event_type == 'new_message':
+                    conv_id = data['id_conversatie_fk']
+                    
+                    # Pas 1: Thread-ul principal marchează mesajul ca 'livrat'
+                    # Aceasta este o operațiune sigură, fără conflict
+                    self.db_handler.execute_commit(
+                        "UPDATE chat_mesaje SET stare = 'livrat' WHERE id = %s AND stare = 'trimis'", 
+                        (data['id'],)
+                    )
+
+                    # Pas 2: Actualizăm contoarele de mesaje necitite
+                    self.unread_counts = self.db_handler.get_unread_message_counts(self.current_user['id'])
+                    self._populate_conversation_list() # Reîmprospătăm lista din stânga
+
+                    # Pas 3: Gestionăm afișarea pentru a evita duplicarea
+                    if conv_id == self.active_conversation_id:
+                        # Dacă fereastra de chat este deja deschisă, reîncărcăm tot istoricul.
+                        # _load_conversation_history se va ocupa și de afișare și de marcarea ca 'citit'.
+                        self._load_conversation_history()
+                    
+                elif event_type == 'status_update':
+                    # Extragem starea primită ('livrat' sau 'citit') din datele evenimentului
+                    new_status = data['stare']
+
+                    # 1. Actualizăm interfața grafică a expeditorului (bifele ✓ sau ✓✓)
+                    #    dacă conversația este deschisă pe ecran.
+                    if data['id_conversatie_fk'] == self.active_conversation_id:
+                        self._update_message_status_in_ui(data['id'], new_status)
+
+                    # 2. CORECȚIE CRITICĂ: Actualizăm starea în baza de date la 'vazut_de_expeditor'
+                    #    DOAR dacă mesajul a fost confirmat ca fiind 'citit'.
+                    #    Acest lucru lasă starea 'livrat' neschimbată, permițând contorului
+                    #    destinatarului să funcționeze corect.
+                    if new_status == 'citit':
+                        self.db_handler.execute_commit(
+                            "UPDATE chat_mesaje SET stare = 'vazut_de_expeditor' WHERE id = %s AND stare = 'citit'",
+                            (data['id'],)
+                        )
+                
+        except queue.Empty:
+            pass # Normal, coada este goală
+        finally:
+            if self.is_running:
+                self.master.after(200, self._process_message_queue) # Verificăm coada mai des
+
+    def _display_message(self, msg_data, is_new=False):
+        """
+        Afișează un singur mesaj în fereastra de chat.
+        Versiune definitivă cu mapare precisă bazată pe tag-uri.
+        """
+        if not self.message_display.winfo_exists(): return
         self.message_display.config(state="normal")
-        
+
+        # --- NOUA LOGICĂ DE MAPARE, BAZATĂ PE TAG-URI ---
+        # Pas 1: Creăm un tag temporar și unic pentru acest mesaj.
+        message_id_tag = f"msg_{msg_data['id']}"
+
+        # Pas 2: Construim și inserăm conținutul principal (textul),
+        # aplicând atât tag-ul de stil ('sent'/'received'), cât și tag-ul unic.
         is_my_message = msg_data['id_expeditor_fk'] == self.current_user['id']
-        tag = "sent" if is_my_message else "received"
+        style_tag = "sent" if is_my_message else "received"
         
         active_conv_details = self.conversation_details.get(self.active_conversation_id)
-        
         prefix = ""
         if active_conv_details and active_conv_details['tip_conversatie'] == 'grup' and not is_my_message:
-            sender_name = (msg_data['expeditor'] or "Utilizator").split(' ')[0]
+            sender_name = (msg_data.get('expeditor') or "Utilizator").split(' ')[0]
             prefix = f"{sender_name}:\n"
         
-        start_index = self.message_display.index(tk.END)
-        
-        formatted_message = f"{prefix}{msg_data['continut_mesaj']}"
-        self.message_display.insert(tk.END, formatted_message, tag)
-        
-        if is_my_message and msg_data['stare'] == 'citit':
-            self.message_display.insert(tk.END, " ✓", "read_receipt")
+        self.message_display.insert(tk.END, f"{prefix}{msg_data['continut_mesaj']}", (style_tag, message_id_tag))
+
+        # Pas 3: Obținem intervalul exact al textului inserat folosind tag-ul unic.
+        tag_range = self.message_display.tag_ranges(message_id_tag)
+
+        if tag_range:
+            start_index = self.message_display.index(tag_range[0])
+            end_index = self.message_display.index(tag_range[1])
+            
+            start_line = int(start_index.split('.')[0])
+            end_line = int(end_index.split('.')[0])
+            
+            # Mapăm fiecare linie din intervalul returnat
+            for line_num in range(start_line, end_line + 1):
+                self.line_to_message_map[str(line_num)] = msg_data
+
+        # Pas 4: Ștergem tag-ul temporar pentru a nu se acumula în memorie.
+        self.message_display.tag_delete(message_id_tag)
+        # --- SFÂRȘIT LOGICĂ DE MAPARE ---
+
+        # Continuăm cu inserarea componentelor non-text (eticheta de status, spațierea)
+        if is_my_message:
+            status_label = ttk.Label(self.message_display, text="", font=("Segoe UI", 8), foreground="blue")
+            
+            stare = msg_data.get('stare')
+            status_text = ""
+            if stare == 'trimis':
+                status_text = " "
+            elif stare == 'livrat':
+                status_text = " ✓"
+            elif stare == 'citit' or stare == 'vazut_de_expeditor':
+                status_text = " ✓✓"
+            status_label.config(text=status_text)
+            
+            self.message_status_labels[msg_data['id']] = status_label
+            self.message_display.window_create(tk.END, window=status_label)
         
         self.message_display.insert(tk.END, "\n\n", "line_spacing")
         
-        end_index = self.message_display.index(tk.END)
-        start_line = int(start_index.split('.')[0])
-        end_line = int(end_index.split('.')[0])
-        for i in range(start_line, end_line + 1):
-             self.line_to_message_map[str(i)] = msg_data
-        
-        self.message_display.see(tk.END)
+        if is_new:
+            self.message_display.see(tk.END)
+            
         self.message_display.config(state="disabled")
 
     def _setup_ui(self):
@@ -355,23 +464,56 @@ class ChatWindow:
     def _hide_tooltip(self, event=None):
         self.tooltip.withdraw()
 
+    def _select_conversation_in_listbox(self, target_conv_id):
+        """Găsește și selectează o conversație în listbox pe baza ID-ului său."""
+        if not target_conv_id:
+            return
+        
+        target_index = None
+        for index, conv_id in self.listbox_map.items():
+            if conv_id == target_conv_id:
+                target_index = index
+                break
+        
+        if target_index is not None and self.conversation_listbox.winfo_exists():
+            self.conversation_listbox.selection_clear(0, tk.END)
+            self.conversation_listbox.selection_set(target_index)
+            self.conversation_listbox.see(target_index)
+            self._on_conversation_selected(None)
+
     def _send_message(self, event=None):
+        """
+        Versiune refactorizată: După trimiterea unui mesaj, forțează o
+        reîncărcare completă a istoricului conversației active.
+        Acest lucru asigură că fereastra de chat este mereu curată și afișează
+        doar mesajele relevante, eliminând afișarea reziduală.
+        """
+        if not self.db_handler.is_connected():
+            messagebox.showwarning("Conexiune Pierdută", "Conexiunea la baza de date s-a pierdut. S-a încercat reconectarea. Vă rugăm trimiteți din nou mesajul.", parent=self.master)
+            return
+
         message_text = self.message_input.get().strip()
         if not message_text or self.active_conversation_id is None:
             return
 
-        try:
-            success = self.db_handler.execute_commit(
-                "INSERT INTO chat_mesaje (id_conversatie_fk, id_expeditor_fk, continut_mesaj) VALUES (%s, %s, %s)",
-                (self.active_conversation_id, self.current_user['id'], message_text)
-            )
-            if success:
-                self.message_input.delete(0, tk.END)
-                self._load_conversation_history()
-            else:
-                messagebox.showwarning("Eroare", "Mesajul nu a putut fi trimis.")
-        except Exception as e:
-            messagebox.showerror("Eroare Trimitere", str(e))
+        # Trimitem mesajul în baza de date
+        new_message_id = self.db_handler.send_chat_message(
+            self.active_conversation_id, self.current_user['id'], message_text
+        )
+
+        if new_message_id:
+            # Ștergem textul din câmpul de introducere
+            self.message_input.delete(0, tk.END)
+            
+            # Actualizăm lista de conversații din stânga pentru a o aduce pe cea curentă în top
+            self._populate_conversation_list()
+            
+            # AICI ESTE CORECȚIA CRITICĂ:
+            # Reîncărcăm complet istoricul conversației. Această funcție va șterge
+            # mesajele vechi și va afișa tot istoricul corect, inclusiv noul mesaj trimis.
+            self._load_conversation_history()
+        else:
+            messagebox.showerror("Eroare", "Mesajul nu a putut fi trimis. Verificați conexiunea și reîncercați.", parent=self.master)
 
     def _on_conversation_selected(self, event=None):
         selection_indices = self.conversation_listbox.curselection()
@@ -396,26 +538,47 @@ class ChatWindow:
         self._load_conversation_history()
 
     def _mark_messages_as_read_in_db(self, message_ids_to_update):
+        """Marchează o listă specifică de ID-uri de mesaje ca fiind 'citit' în DB."""
         if not message_ids_to_update:
             return
         
         try:
-            cursor = self.db_handler.conn.cursor()
             placeholders = ','.join(['%s'] * len(message_ids_to_update))
+            # Actualizăm starea doar pentru ID-urile specificate
             sql_update = f"UPDATE chat_mesaje SET stare = 'citit' WHERE id IN ({placeholders})"
-            cursor.execute(sql_update, tuple(message_ids_to_update))
-            cursor.close()
+            self.db_handler.execute_commit(sql_update, tuple(message_ids_to_update))
         except Exception as e:
             print(f"EROARE la marcarea mesajelor ca citite: {e}")
+    
+    def _mark_messages_as_read(self, conversation_id):
+        """Marchează toate mesajele necitite dintr-o conversație ca fiind 'citit'."""
+        if not conversation_id: return
+        
+        # Marchează în baza de date
+        sql_update = """
+            UPDATE chat_mesaje 
+            SET stare = 'citit' 
+            WHERE id_conversatie_fk = %s 
+            AND id_expeditor_fk != %s 
+            AND stare != 'citit'
+        """
+        self.db_handler.execute_commit(sql_update, (conversation_id, self.current_user['id']))
+        
+        # Resetează contorul de mesaje necitite în UI și actualizează lista
+        if conversation_id in self.unread_counts:
+            self.unread_counts[conversation_id] = 0
+        self._update_conversation_list_item(conversation_id)
 
     def _get_or_create_conversation(self, partner_id):
         my_id = self.current_user['id']
+        
+        # Pasul 1: Verificăm dacă există deja o conversație (folosind conexiunea principală, acum sigură)
         sql_find = """
             SELECT p.id_conversatie_fk
             FROM chat_participanti p
             JOIN chat_conversatii c ON p.id_conversatie_fk = c.id
             WHERE c.tip_conversatie = 'unu_la_unu'
-              AND p.id_utilizator_fk IN (%s, %s)
+            AND p.id_utilizator_fk IN (%s, %s)
             GROUP BY p.id_conversatie_fk
             HAVING COUNT(DISTINCT p.id_utilizator_fk) = 2
             LIMIT 1;
@@ -425,22 +588,8 @@ class ChatWindow:
         if conversation_id:
             return conversation_id
         else:
-            cursor = None
-            try:
-                cursor = self.db_handler.conn.cursor()
-                cursor.execute("INSERT INTO chat_conversatii (tip_conversatie) VALUES ('unu_la_unu')")
-                new_conv_id = cursor.lastrowid
-                
-                participants = [(new_conv_id, my_id), (new_conv_id, partner_id)]
-                cursor.executemany("INSERT INTO chat_participanti (id_conversatie_fk, id_utilizator_fk) VALUES (%s, %s)", participants)
-                
-                return new_conv_id
-            except Exception as e:
-                messagebox.showerror("Eroare Creare Conversație", str(e))
-                return None
-            finally:
-                if cursor:
-                    cursor.close()
+            # Pasul 2: Dacă nu există, apelăm noua metodă atomică pentru a o crea
+            return self.db_handler.create_one_on_one_conversation(my_id, partner_id)
 
     def _load_initial_state(self):
         print("INFO: Se încarcă starea inițială (mesaje necitite)...")
@@ -448,32 +597,34 @@ class ChatWindow:
         print(f"INFO: Stare inițială încărcată. Contoare: {self.unread_counts}.")
 
     def _load_conversation_history(self):
+        """
+        Încarcă istoricul de mesaje. Versiune finală, stabilă, care corectează
+        atât contorul de mesaje necitite, cât și afișarea separatorului de dată.
+        """
+        # --- 1. Curățarea interfeței ---
         self.message_display.config(state="normal")
         self.message_display.delete("1.0", tk.END)
+        self.message_status_labels.clear()
         self.line_to_message_map.clear()
 
         if not self.active_conversation_id:
             self.message_display.config(state="disabled")
             return
         
-        messages = self.db_handler.fetch_all_dict(
-            """
-            SELECT m.id, m.id_expeditor_fk, m.continut_mesaj, m.timestamp, m.stare,
-                   COALESCE(u.nume_complet, u.username) AS expeditor
-            FROM chat_mesaje m
-            JOIN utilizatori u ON m.id_expeditor_fk = u.id
-            WHERE m.id_conversatie_fk = %s ORDER BY m.timestamp ASC
-            """, (self.active_conversation_id,)
-        )
+        messages = self.db_handler.get_messages_for_conversation(self.active_conversation_id)
         
+        # --- 2. CORECȚIE REGRESIE CONTOR: Marcare sincronă a mesajelor ca citite ---
         ids_to_mark_as_read = [
             msg['id'] for msg in messages 
             if msg['id_expeditor_fk'] != self.current_user['id'] and msg['stare'] != 'citit'
         ]
-
         if ids_to_mark_as_read:
-            self._mark_messages_as_read_in_db(ids_to_mark_as_read)
+            # Se execută actualizarea direct și sincron în baza de date
+            placeholders = ', '.join(['%s'] * len(ids_to_mark_as_read))
+            query = f"UPDATE chat_mesaje SET stare = 'citit' WHERE id IN ({placeholders})"
+            self.db_handler.execute_commit(query, tuple(ids_to_mark_as_read))
         
+        # Se actualizează contoarele DUPĂ ce baza de date a fost modificată
         self.unread_counts = self.db_handler.get_unread_message_counts(self.current_user['id'])
         self._populate_conversation_list()
         
@@ -481,143 +632,171 @@ class ChatWindow:
             self.message_display.config(state="disabled")
             return
 
+        # --- 3. Procesarea și afișarea datelor ---
+        display_items = []
         last_message_date = None
         for msg in messages:
             current_message_date = msg['timestamp'].date()
             if current_message_date != last_message_date:
-                date_str = current_message_date.strftime('%d %B %Y')
-                self.message_display.insert(tk.END, f"\n{date_str}\n", "date_separator")
+                display_items.append({'type': 'date_separator', 'date': current_message_date})
                 last_message_date = current_message_date
             
-            if msg['id'] in ids_to_mark_as_read:
-                msg['stare'] = 'citit'
-            
-            self._display_message(msg)
+            display_items.append({'type': 'message', 'data': msg})
 
+        romanian_months = [
+            "Ianuarie", "Februarie", "Martie", "Aprilie", "Mai", "Iunie",
+            "Iulie", "August", "Septembrie", "Octombrie", "Noiembrie", "Decembrie"
+        ]
+
+        for item in display_items:
+            if item['type'] == 'date_separator':
+                # --- 4. CORECȚIE FINALĂ SEPARATOR DATĂ: Metodă robustă ---
+                current_date = item['date']
+                month_name = romanian_months[current_date.month - 1]
+                date_str = f"{current_date.day} {month_name} {current_date.year}"
+                
+                # Inserăm textul cu spațierea necesară (un rând liber înainte, unul după)
+                self.message_display.insert(tk.END, f"\n{date_str}\n")
+                
+                # Obținem indexul liniei pe care tocmai am inserat data.
+                # tk.END este acum la începutul liniei *următoare*.
+                # Deci, linia cu data este linia de dinainte de tk.END.
+                # Scădem 1 din numărul liniei curente de la final.
+                line_of_date = str(int(self.message_display.index(tk.END).split('.')[0]) - 1)
+                
+                # Aplicăm tag-ul de centrare pe întreaga linie, de la caracterul 0 la final.
+                self.message_display.tag_add("date_separator", f"{line_of_date}.0", f"{line_of_date}.end")
+
+            elif item['type'] == 'message':
+                msg_data = item['data']
+                # Actualizăm starea în UI dacă mesajul tocmai a fost marcat ca citit
+                if msg_data['id'] in ids_to_mark_as_read:
+                    msg_data['stare'] = 'citit'
+                self._display_message(msg_data)
+
+        # După ce toate mesajele au fost afișate, forțăm derularea la final.
+        self.message_display.see(tk.END)
+        
         self.message_display.config(state="disabled")
 
     def _populate_conversation_list(self):
+        """
+        Încarcă și afișează toate conversațiile pentru utilizatorul curent.
+        Versiune finală care elimină opțiunea "-font" incompatibilă.
+        """
         try:
-            my_id = self.current_user['id']
-            sql = """
-                (SELECT
-                    c.id AS conversation_id, 'unu_la_unu' as tip_conversatie,
-                    other_p.id_utilizator_fk AS partner_id, ou.last_seen,
-                    COALESCE(ou.nume_complet, ou.username) as display_name,
-                    (SELECT MAX(timestamp) FROM chat_mesaje cm WHERE cm.id_conversatie_fk = c.id) as last_message_time
-                FROM chat_conversatii c
-                JOIN chat_participanti my_p ON c.id = my_p.id_conversatie_fk AND my_p.id_utilizator_fk = %s
-                JOIN chat_participanti other_p ON c.id = other_p.id_conversatie_fk AND other_p.id_utilizator_fk != %s
-                LEFT JOIN utilizatori ou ON other_p.id_utilizator_fk = ou.id
-                WHERE c.tip_conversatie = 'unu_la_unu')
-                UNION
-                (SELECT c.id AS conversation_id, 'grup' as tip_conversatie,
-                    NULL AS partner_id, NULL AS last_seen,
-                    c.nume_conversatie AS display_name,
-                    (SELECT MAX(timestamp) FROM chat_mesaje cm WHERE cm.id_conversatie_fk = c.id) as last_message_time
-                FROM chat_conversatii c
-                JOIN chat_participanti my_p ON c.id = my_p.id_conversatie_fk AND my_p.id_utilizator_fk = %s
-                WHERE c.tip_conversatie = 'grup')
-                ORDER BY last_message_time DESC;
-            """
-            conversations = self.db_handler.fetch_all_dict(sql, (my_id, my_id, my_id))
-            
-            current_selection_indices = self.conversation_listbox.curselection()
-            
+            current_selection_id = self.active_conversation_id
+
             self.conversation_listbox.delete(0, tk.END)
             self.listbox_map.clear()
             self.conversation_details.clear()
+            
+            my_id = self.current_user['id']
+            
+            sql = """
+                SELECT
+                    c.id AS conversation_id, c.tip_conversatie, c.nume_conversatie AS nume_grup,
+                    (
+                        SELECT GROUP_CONCAT(COALESCE(u.nume_complet, u.username) SEPARATOR ', ')
+                        FROM chat_participanti cp JOIN utilizatori u ON cp.id_utilizator_fk = u.id
+                        WHERE cp.id_conversatie_fk = c.id AND cp.id_utilizator_fk != %s
+                    ) AS participant_names,
+                    (
+                        SELECT MAX(u.last_seen)
+                        FROM chat_participanti cp JOIN utilizatori u ON cp.id_utilizator_fk = u.id
+                        WHERE cp.id_conversatie_fk = c.id AND cp.id_utilizator_fk != %s
+                    ) as partner_last_seen,
+                    (SELECT MAX(timestamp) FROM chat_mesaje cm WHERE cm.id_conversatie_fk = c.id) as last_message_time
+                FROM chat_conversatii c
+                WHERE c.id IN (SELECT id_conversatie_fk FROM chat_participanti WHERE id_utilizator_fk = %s)
+                ORDER BY last_message_time DESC;
+            """
+            
+            conversations = self.db_handler.fetch_all_dict(sql, (my_id, my_id, my_id))
+            if not conversations:
+                return
 
-            if conversations:
-                for index, conv in enumerate(conversations):
-                    self.conversation_details[conv['conversation_id']] = conv
-                    
-                    display_name = conv['display_name'] or "Conversație"
-                    status_symbol = ""
-                    is_online = False
-                    
-                    if conv['tip_conversatie'] == 'unu_la_unu':
-                        is_online = conv['last_seen'] and (datetime.now() - conv['last_seen'] < timedelta(seconds=15))
-                        status_symbol = "✓" if is_online else "✗"
-                    else:
-                        status_symbol = "●"
+            for index, conv in enumerate(conversations):
+                conv_id = conv['conversation_id']
+                self.conversation_details[conv_id] = conv
+                
+                if conv['tip_conversatie'] == 'grup':
+                    display_name = conv['nume_grup'] or 'Grup fără nume'
+                    status_symbol = "●"
+                    is_online = False # Statusul online nu se aplică la grupuri
+                    color = '#0000AA' # Albastru pentru grup
+                else:
+                    display_name = conv['participant_names'] or 'Utilizator șters'
+                    last_seen = conv.get('partner_last_seen')
+                    is_online = last_seen and (datetime.now() - last_seen < timedelta(seconds=15))
+                    status_symbol = "✓" if is_online else "✗"
+                    color = 'green' if is_online else '#A93226' # Verde/Roșu pentru utilizatori
+                
+                # --- BLOC PENTRU AFIȘAREA NUMĂRULUI ---
+                unread_count = self.unread_counts.get(conv_id, 0)
+                
+                # Construim textul final
+                final_display_text = f" {status_symbol} {display_name}"
+                if unread_count > 0:
+                    # Adăugăm numărul de mesaje necitite și îngroșăm textul
+                    final_display_text += f" ({unread_count})"
+                    # Setăm culoarea textului pe roșu pentru a atrage atenția
+                    item_color = '#E67E22' # O nuanță de portocaliu pentru notificări
+                else:
+                    item_color = color # Culoarea standard (verde/albastru/roșu)
+                # --- SFÂRȘIT BLOC ---
+                
+                self.conversation_listbox.insert(index, final_display_text)
+                self.listbox_map[index] = conv_id
+                
+                self.conversation_listbox.itemconfig(index, {'fg': item_color})
 
-                    unread_count = 0
-                    if conv['tip_conversatie'] == 'grup':
-                        group_unread_messages = self.db_handler.fetch_scalar("""
-                            SELECT COUNT(*) FROM chat_mesaje
-                            WHERE id_conversatie_fk = %s AND id_expeditor_fk != %s AND stare != 'citit'
-                        """, (conv['conversation_id'], my_id))
-                        unread_count = group_unread_messages or 0
-                    else:
-                        partner_id = conv.get('partner_id')
-                        if partner_id:
-                            unread_count = self.unread_counts.get(partner_id, 0)
-                    
-                    # --- BLOC MODIFICAT PENTRU A FOLOSI ASTERISC ---
-                    unread_prefix = ""
-                    if unread_count > 0:
-                        display_name = f"{display_name} ({unread_count})"
-                        unread_prefix = "* " # Adăugăm asteriscul
-                    
-                    final_display_text = f" {status_symbol} {unread_prefix}{display_name}"
-                    self.conversation_listbox.insert(index, final_display_text)
-                    self.listbox_map[index] = conv['conversation_id']
-                    
-                    # Aplicăm stilurile (doar culoare, fără font)
-                    color_to_apply = 'black'
-                    if conv['tip_conversatie'] == 'grup':
-                        color_to_apply = '#0000AA' # Albastru pentru grupuri
-                    elif is_online:
-                        color_to_apply = 'green' # Verde pentru online
-                    else:
-                        color_to_apply = '#A93226' # Roșu pentru offline
-                        
-                    self.conversation_listbox.itemconfig(index, {'fg': color_to_apply})
-                    # --- SFÂRȘIT BLOC MODIFICAT ---
+                # LINIA NOUĂ PENTRU FUNDAL
+                if unread_count > 0:
+                    self.conversation_listbox.itemconfig(index, {'bg': '#E0FFFF'}) # Culoare Cyan deschis pentru fundal
 
-            if current_selection_indices:
-                self.conversation_listbox.selection_set(current_selection_indices[0])
-            else:
-                if self.conversation_listbox.size() > 0:
-                    self.conversation_listbox.selection_set(0)
-                    self._on_conversation_selected(event=None)
+            if current_selection_id:
+                for i, conv_id in self.listbox_map.items():
+                    if conv_id == current_selection_id:
+                        self.conversation_listbox.selection_set(i)
+                        break
+            elif self.conversation_listbox.size() > 0:
+                self.conversation_listbox.selection_set(0)
+                self._on_conversation_selected(None)
 
         except Exception as e:
-            messagebox.showerror("Eroare", f"Nu s-a putut încărca lista de conversații: {e}")
+            messagebox.showerror("Eroare", f"Nu s-a putut încărca lista de conversații: {str(e)}", parent=self.master)
 
     def _on_new_conversation(self):
+        """
+        Versiune finală: Verifică dacă există utilizatori, apoi deschide noul dialog custom.
+        """
+        # Pasul 1: Verificăm dacă există utilizatori disponibili
         available_users = self.db_handler.fetch_all_dict(
-            "SELECT id, username, nume_complet FROM utilizatori WHERE activ = TRUE AND id != %s ORDER BY nume_complet ASC",
+            "SELECT id, username, nume_complet FROM utilizatori WHERE id != %s AND activ = 1",
             (self.current_user['id'],)
         )
+
         if not available_users:
-            messagebox.showinfo("Informație", "Nu există alți utilizatori disponibili.", parent=self.master)
+            messagebox.showinfo("Niciun Utilizator", "Nu există alți utilizatori activi în sistem pentru a începe o conversație.", parent=self.master)
             return
 
-        dialog = NewChatDialog(self.master, available_users)
-        
+        # Pasul 2: Creăm și afișăm noul dialog, care este acum robust
+        dialog = UserSelectionDialog(self.master, available_users)
+        self.master.wait_window(dialog)
+
+        # Pasul 3: Procesăm rezultatul
         if dialog.result:
-            partner_id = dialog.result
-            conv_id = self._get_or_create_conversation(partner_id)
-            if conv_id:
-                # Reîmprospătăm lista de conversații
+            partner_id = dialog.result.get('id')
+            if not partner_id:
+                return
+
+            conversation_id = self._get_or_create_conversation(partner_id)
+            
+            if conversation_id:
+                self.active_conversation_id = conversation_id
                 self._populate_conversation_list()
-                
-                # Căutăm indexul listbox-ului care corespunde noului ID de conversație
-                target_index = None
-                # Inversăm harta pentru a găsi cheia (index) după valoare (conv_id)
-                for index, c_id in self.listbox_map.items():
-                    if c_id == conv_id:
-                        target_index = index
-                        break
-                
-                # Dacă am găsit indexul, selectăm elementul în Listbox
-                if target_index is not None:
-                    self.conversation_listbox.selection_set(target_index)
-                    self.conversation_listbox.see(target_index) # Asigură vizibilitatea
-                    # Apelăm manual handler-ul pentru a încărca istoricul
-                    self._on_conversation_selected()
+                self._select_conversation_in_listbox(conversation_id)
 
 class CreateGroupDialog(simpledialog.Dialog):
     def __init__(self, parent, all_users):
@@ -626,47 +805,34 @@ class CreateGroupDialog(simpledialog.Dialog):
         super().__init__(parent, "Creare Conversație de Grup Nouă")
 
     def body(self, master):
-        main_pane = ttk.PanedWindow(master, orient=tk.HORIZONTAL)
-        main_pane.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        groups_list_frame = ttk.LabelFrame(main_pane, text="Grupurile Mele", width=250)
-        main_pane.add(groups_list_frame, weight=1)
-        self.groups_listbox = tk.Listbox(groups_list_frame, exportselection=False)
-        self.groups_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.groups_listbox.bind("<<ListboxSelect>>", self._on_group_select)
-
-        details_frame = ttk.LabelFrame(main_pane, text="Detalii Grup Selectat")
-        main_pane.add(details_frame, weight=2)
-
-        name_frame = ttk.Frame(details_frame)
+        # Frame pentru numele grupului
+        name_frame = ttk.Frame(master)
         name_frame.pack(fill=tk.X, padx=10, pady=(10, 5))
-        ttk.Label(name_frame, text="Nume:").pack(side=tk.LEFT)
-        self.group_name_var = tk.StringVar(master)
-        self.group_name_entry = ttk.Entry(name_frame, textvariable=self.group_name_var, state="disabled")
+        ttk.Label(name_frame, text="Nume Grup:").pack(side=tk.LEFT)
+        self.group_name_entry = ttk.Entry(name_frame, width=40)
         self.group_name_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        self.save_name_button = ttk.Button(name_frame, text="Salvează Nume", state="disabled", command=self._save_group_name)
-        self.save_name_button.pack(side=tk.LEFT)
 
-        participants_frame = ttk.LabelFrame(details_frame, text="Participanți")
-        participants_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        self.participants_listbox = tk.Listbox(participants_frame, exportselection=False)
-        self.participants_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.participants_listbox.bind("<<ListboxSelect>>", self._on_participant_select)
+        # Frame pentru lista de utilizatori
+        users_frame = ttk.LabelFrame(master, text="Selectați Participanții (Ctrl+Click pentru selecție multiplă)")
+        users_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        participant_actions_frame = ttk.Frame(details_frame)
-        participant_actions_frame.pack(fill=tk.X, padx=10, pady=5)
-        self.add_participant_button = ttk.Button(participant_actions_frame, text="Adaugă Participant", state="disabled", command=self._add_participant)
-        self.add_participant_button.pack(side=tk.LEFT)
-        self.remove_participant_button = ttk.Button(participant_actions_frame, text="Șterge Participant", state="disabled", command=self._remove_participant)
-        self.remove_participant_button.pack(side=tk.LEFT, padx=5)
+        list_container = ttk.Frame(users_frame)
+        list_container.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        group_actions_frame = ttk.Frame(details_frame)
-        group_actions_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=10, pady=10)
-        self.delete_group_button = ttk.Button(group_actions_frame, text="Șterge Grupul", state="disabled", command=self._delete_group)
-        self.delete_group_button.pack(side=tk.RIGHT)
-        
-        self._populate_group_list()
-        return self.groups_listbox
+        self.user_listbox = tk.Listbox(list_container, selectmode=tk.MULTIPLE, exportselection=False, height=10)
+        self.user_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(list_container, orient=tk.VERTICAL, command=self.user_listbox.yview)
+        self.user_listbox.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Populăm lista cu utilizatorii disponibili
+        for user in self.all_users:
+            display_name = user.get('nume_complet') or user.get('username')
+            self.user_listbox.insert(tk.END, display_name)
+
+        # Returnăm widget-ul care trebuie să aibă focus inițial
+        return self.group_name_entry
 
     def validate(self):
         self.group_name = self.group_name_entry.get().strip()
@@ -992,3 +1158,82 @@ class GroupManagerDialog(tk.Toplevel):
             finally:
                 if cursor:
                     cursor.close()
+
+class UserSelectionDialog(tk.Toplevel):
+    """
+    Fereastră de dialog custom pentru selecția unui utilizator.
+    Rescrisă de la zero pentru a fi robustă și a elimina eroarea TclError.
+    """
+    def __init__(self, parent, users_list):
+        super().__init__(parent)
+        self.transient(parent)
+        self.grab_set()
+        self.title("Selectați un Utilizator")
+        self.resizable(False, False)
+
+        self.users = users_list
+        self.result = None
+
+        # --- Crearea widget-urilor ---
+        main_frame = ttk.Frame(self, padding="10")
+        main_frame.pack(fill="both", expand=True)
+
+        list_frame = ttk.Frame(main_frame)
+        list_frame.pack(fill="both", expand=True, pady=(0, 10))
+
+        self.listbox = Listbox(list_frame, width=50, height=10, font=("Segoe UI", 10), exportselection=False)
+        self.listbox.pack(side="left", fill="both", expand=True)
+
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.listbox.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.listbox.config(yscrollcommand=scrollbar.set)
+
+        for user in self.users:
+            display_name = user.get('nume_complet') or user.get('username')
+            self.listbox.insert(END, display_name)
+        
+        self.listbox.bind("<Double-1>", self._on_ok)
+        if self.users:
+            self.listbox.focus_set()
+            self.listbox.selection_set(0)
+
+        # --- Crearea butoanelor ---
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill="x", side="bottom")
+
+        # Butonul de anulare (dreapta) este împachetat primul
+        cancel_button = ttk.Button(button_frame, text="Renunță", command=self._on_cancel)
+        cancel_button.pack(side="right")
+
+        # Butonul OK (stânga) este împachetat al doilea
+        ok_button = ttk.Button(button_frame, text="OK", command=self._on_ok)
+        ok_button.pack(side="right", padx=(5, 0))
+        
+        # Protocol pentru închiderea cu 'X'
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+        # Centrarea ferestrei
+        self.update_idletasks()
+        parent_x = parent.winfo_x()
+        parent_y = parent.winfo_y()
+        parent_width = parent.winfo_width()
+        parent_height = parent.winfo_height()
+        dialog_width = self.winfo_width()
+        dialog_height = self.winfo_height()
+        position_x = parent_x + (parent_width // 2) - (dialog_width // 2)
+        position_y = parent_y + (parent_height // 2) - (dialog_height // 2)
+        self.geometry(f"+{position_x}+{position_y}")
+
+    def _on_ok(self, event=None):
+        selections = self.listbox.curselection()
+        if not selections:
+            messagebox.showwarning("Nicio Selecție", "Vă rugăm selectați un utilizator.", parent=self)
+            return
+        
+        selected_index = selections[0]
+        self.result = self.users[selected_index]
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.destroy()

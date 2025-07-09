@@ -8,7 +8,7 @@ AppVersion=4.4.2
 AppPublisher=Regio Development
 
 ; 1. Adaugă acordul de licență care trebuie acceptat
-; Asigurați-vă că fișierul 'LICENSE.md' se află în același folder cu scriptul .iss
+; Asigurați-vă că fișierul 'LICENSE.rtf' se află în același folder cu scriptul .iss
 LicenseFile=LICENSE.rtf
 
 ; 2. Setează iconița pentru fișierul de instalare (setup.exe)

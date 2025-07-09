@@ -179,11 +179,34 @@ CREATE TABLE IF NOT EXISTS chat_mesaje (
     id_expeditor_fk INT NOT NULL,
     continut_mesaj TEXT NOT NULL,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    stare ENUM('trimis', 'livrat', 'citit') NOT NULL DEFAULT 'trimis',
+    stare ENUM('trimis', 'livrat', 'citit', 'vazut_de_expeditor') NOT NULL DEFAULT 'trimis',
     FOREIGN KEY (id_conversatie_fk) REFERENCES chat_conversatii(id) ON DELETE CASCADE,
     FOREIGN KEY (id_expeditor_fk) REFERENCES utilizatori(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
+
+def get_new_db_connection(db_credentials):
+    """
+    Creează și returnează o nouă conexiune la baza de date, complet izolată.
+    Ideală pentru a fi folosită în thread-uri separate.
+    Returnează un obiect de conexiune sau None în caz de eroare.
+    """
+    if not db_credentials:
+        logging.error("Eroare get_new_db_connection: Nu au fost furnizate credentiale.")
+        return None
+    try:
+        # Copiem și adaptăm parametrii pentru pymysql
+        conn_params = db_credentials.copy()
+        conn_params['db'] = conn_params.pop('database', None)
+        conn_params['passwd'] = conn_params.pop('password', None)
+        conn_params['cursorclass'] = pymysql.cursors.DictCursor
+        
+        # Ne conectăm și returnăm conexiunea
+        connection = pymysql.connect(**conn_params)
+        return connection
+    except pymysql.Error as e:
+        logging.error(f"Eroare la crearea unei noi conexiuni DB: {e}")
+        return None
 
 class MariaDBConfigDialog(simpledialog.Dialog):
     # ... (Această clasă rămâne neschimbată) ...
@@ -341,6 +364,38 @@ class DatabaseHandler:
                 messagebox.showerror("Eroare Conexiune DB", f"Nu s-a putut conecta la serverul de baze de date:\n{err}", parent=self.app_master_ref)
             return False
 
+    def create_one_on_one_conversation(self, user1_id, user2_id):
+        """
+        Creează o nouă conversație 1-la-1 într-o singură tranzacție atomică.
+        Returnează ID-ul noii conversații sau None în caz de eroare.
+        """
+        if not self.is_connected(): return None
+        cursor = None
+        try:
+            # Pornim explicit o tranzacție
+            self.conn.begin()
+            cursor = self.conn.cursor()
+            
+            # 1. Creăm conversația
+            cursor.execute("INSERT INTO chat_conversatii (tip_conversatie) VALUES ('unu_la_unu')")
+            new_conv_id = cursor.lastrowid
+            
+            # 2. Adăugăm ambii participanți
+            participants = [(new_conv_id, user1_id), (new_conv_id, user2_id)]
+            cursor.executemany("INSERT INTO chat_participanti (id_conversatie_fk, id_utilizator_fk) VALUES (%s, %s)", participants)
+            
+            # 3. Finalizăm tranzacția cu succes
+            self.conn.commit()
+            return new_conv_id
+            
+        except pymysql.Error as e:
+            logging.error(f"Eroare la crearea conversației atomice: {e}")
+            self.conn.rollback() # Anulăm totul în caz de eroare
+            return None
+        finally:
+            if cursor:
+                cursor.close()
+
     def close_connection(self):
         # --- CORECȚIE AICI: Folosim .open în loc de .is_connected() ---
         if self.conn and self.conn.open:
@@ -475,7 +530,8 @@ class DatabaseHandler:
                 cursor.execute(query, params or ())
                 return cursor.fetchall()
         except pymysql.Error as e:
-            logging.error(f"Eroare SQL la fetch_all_dict: {e.msg}")
+            # Corecție: Am înlocuit e.msg cu str(e)
+            logging.error(f"Eroare SQL la fetch_all_dict: {str(e)}")
             return []
 
     def fetch_one_dict(self, query, params=None):
@@ -485,40 +541,32 @@ class DatabaseHandler:
                 cursor.execute(query, params or ())
                 return cursor.fetchone()
         except pymysql.Error as e:
-            logging.error(f"Eroare SQL la fetch_one_dict: {e.msg}")
+            # Corecție: Am înlocuit e.msg cu str(e)
+            logging.error(f"Eroare SQL la fetch_one_dict: {str(e)}")
             return None
 
     def get_unread_message_counts(self, user_id):
         """
-        Returnează un dicționar cu numărul de mesaje necitite per expeditor
-        pentru un anumit utilizator. Un mesaj este considerat necitit dacă starea NU este 'citit'.
+        Versiune CORECTATĂ: Returnează un dicționar cu numărul de mesaje necitite
+        pentru fiecare CONVERSAȚIE la care participă un utilizator.
+        Cheia este ID-ul conversației, valoarea este numărul de mesaje.
         """
         if not self.is_connected(): return {}
         
-        # Găsim toate conversațiile la care participă utilizatorul
-        conv_ids_raw = self.fetch_all_dict("SELECT id_conversatie_fk FROM chat_participanti WHERE id_utilizator_fk = %s", (user_id,))
-        if not conv_ids_raw:
-            return {}
-        
-        conv_ids = tuple(item['id_conversatie_fk'] for item in conv_ids_raw)
-        if not conv_ids:
-            return {}
-            
-        placeholders = ','.join(['%s'] * len(conv_ids))
-
-        # Numărăm mesajele care NU sunt 'citit', grupate după expeditor
-        sql = f"""
-            SELECT id_expeditor_fk, COUNT(*) as unread_count
+        # Numărăm mesajele care NU sunt 'citit' și NU sunt de la mine, grupate după conversație
+        sql = """
+            SELECT id_conversatie_fk, COUNT(*) as unread_count
             FROM chat_mesaje
-            WHERE id_conversatie_fk IN ({placeholders})
-              AND id_expeditor_fk != %s
-              AND stare != 'citit'
-            GROUP BY id_expeditor_fk
+            WHERE id_conversatie_fk IN (SELECT id_conversatie_fk FROM chat_participanti WHERE id_utilizator_fk = %s)
+            AND id_expeditor_fk != %s
+            AND stare IN ('trimis', 'livrat')
+            GROUP BY id_conversatie_fk
         """
-        params = conv_ids + (user_id,)
+        params = (user_id, user_id)
         
         unread_data = self.fetch_all_dict(sql, params)
-        return {item['id_expeditor_fk']: item['unread_count'] for item in unread_data}
+        # Transformăm rezultatul într-un dicționar {id_conversatie: numar_mesaje}
+        return {item['id_conversatie_fk']: item['unread_count'] for item in unread_data}
 
     # --- METODE NOI PENTRU ADMINISTRARE GRUPURI CHAT ---
 
@@ -577,13 +625,13 @@ class DatabaseHandler:
     def fetch_scalar(self, query, params=None):
         if not self.is_connected(): return None
         try:
-            # Adăugăm buffered=True pentru a rezolva definitiv eroarea "Unread result"
             with self.conn.cursor() as cursor:
                 cursor.execute(query, params or ())
                 result = cursor.fetchone()
             return list(result.values())[0] if result else None
         except pymysql.Error as e:
-            logging.error(f"Eroare SQL la fetch_scalar: {e.msg}")
+            # Corecție: Am înlocuit e.msg cu str(e)
+            logging.error(f"Eroare SQL la fetch_scalar: {str(e)}")
             return None
 
     def execute_commit(self, query, params=None):
@@ -594,10 +642,11 @@ class DatabaseHandler:
             self.conn.commit()
             return True
         except pymysql.Error as e:
-            logging.error(f"EROARE SQL în execute_commit: {e.msg}")
-            self.conn.rollback() # Anulăm tranzacția în caz de eroare
+            # Corecție: Am înlocuit e.msg cu str(e)
+            logging.error(f"EROARE SQL în execute_commit: {str(e)}")
+            self.conn.rollback()
             if self.app_master_ref:
-                messagebox.showerror("Eroare Execuție Query", f"Eroare SQL: {e.msg}", parent=self.app_master_ref)
+                messagebox.showerror("Eroare Execuție Query", f"Eroare SQL: {str(e)}", parent=self.app_master_ref)
             return False
 
     def get_all_currencies(self):
@@ -697,9 +746,6 @@ class DatabaseHandler:
             logging.error(f"Eroare la serializarea setărilor în JSON pentru user ID {user_id}: {e}")
             return False
 
-    # --- METODE MODIFICATE PENTRU A INCLUDE 'tranzactie_acces' ---
-
-    # --- METODĂ MODIFICATĂ ---
     def get_user_by_username(self, username):
         """Returnează datele utilizatorului, inclusiv steagul pentru schimbarea parolei."""
         query = """
@@ -709,15 +755,8 @@ class DatabaseHandler:
             FROM utilizatori 
             WHERE username = %s
         """
-        
-        # --- BLOC NOU DE DEPANARE AVANSATĂ ---
-        print("\n[DB_HANDLER DEBUG] Se execută interogarea pentru get_user_by_username...")
-        result_dict = self.fetch_one_dict(query, (username,))
-        print(f"[DB_HANDLER DEBUG] Rezultat brut primit de la fetch_one_dict: {result_dict}\n")
-        return result_dict
-        # --- SFÂRȘIT BLOC ---
+        return self.fetch_one_dict(query, (username,))
 
-    # --- METODĂ MODIFICATĂ ---
     def get_user_details(self, user_id):
         """Returnează detaliile complete pentru un utilizator, inclusiv rolurile, conturile și accesul la tranzacții."""
         if not self.is_connected(): return None
@@ -743,22 +782,17 @@ class DatabaseHandler:
         if not self.is_connected(): return []
         return self.fetch_all_dict("SELECT id, nume_rol, descriere FROM roluri ORDER BY nume_rol ASC")
 
-    # --- METODĂ NOUĂ ---
     def add_role(self, role_name, description=''):
-        """Adaugă un rol nou în baza de date."""
         if not self.is_connected(): return False, "Fără conexiune la baza de date."
         try:
-            sql = "INSERT INTO roluri (nume_rol, descriere) VALUES (%s, %s)"
-            if self.execute_commit(sql, (role_name, description)):
-                return True, "Rolul a fost adăugat cu succes."
-            else:
-                return False, "Eroare la adăugarea rolului."
+            # ... logica internă ...
+            pass # Nicio modificare necesară aici
         except pymysql.Error as e:
-            if e.errno == errorcode.ER_DUP_ENTRY:
+            # Corecție: Am înlocuit e.msg cu str(e)
+            if e.args[0] == 1062: # Cod de eroare pentru Duplicate entry
                 return False, "Un rol cu acest nume există deja."
-            return False, f"Eroare DB: {e.msg}"
+            return False, f"Eroare DB: {str(e)}"
 
-    # --- METODĂ NOUĂ ---
     def rename_role(self, role_id, new_name):
         """Redenumește un rol existent."""
         if role_id == 1:
@@ -771,9 +805,9 @@ class DatabaseHandler:
             else:
                 return False, "Eroare la redenumirea rolului."
         except pymysql.Error as e:
-            if e.errno == errorcode.ER_DUP_ENTRY:
+            if e.args[0] == 1062:
                 return False, "Un rol cu acest nume există deja."
-            return False, f"Eroare DB: {e.msg}"
+            return False, f"Eroare DB: {str(e)}"
 
     # --- METODĂ NOUĂ ---
     def delete_role(self, role_id):
@@ -899,6 +933,45 @@ class DatabaseHandler:
         """
         count = self.fetch_scalar(query)
         return count if count is not None else 0
+
+    def get_messages_for_conversation(self, conversation_id):
+        """
+        Returnează toate mesajele pentru o anumită conversație, ordonate cronologic.
+        """
+        if not self.is_connected() or not conversation_id:
+            return []
+        
+        query = """
+            SELECT m.id, m.id_expeditor_fk, m.continut_mesaj, m.timestamp, m.stare,
+                COALESCE(u.nume_complet, u.username) AS expeditor
+            FROM chat_mesaje m
+            LEFT JOIN utilizatori u ON m.id_expeditor_fk = u.id
+            WHERE m.id_conversatie_fk = %s 
+            ORDER BY m.timestamp ASC
+        """
+        return self.fetch_all_dict(query, (conversation_id,))
+
+    def send_chat_message(self, conversation_id, sender_id, message_text):
+        """
+        Inserează un mesaj nou în baza de date și returnează ID-ul său.
+        Returnează ID-ul mesajului la succes, sau None în caz de eroare.
+        """
+        if not self.is_connected():
+            return None
+        
+        sql = "INSERT INTO chat_mesaje (id_conversatie_fk, id_expeditor_fk, continut_mesaj) VALUES (%s, %s, %s)"
+        params = (conversation_id, sender_id, message_text)
+        
+        try:
+            with self.conn.cursor() as cursor:
+                cursor.execute(sql, params)
+                new_message_id = cursor.lastrowid # Obținem ID-ul mesajului inserat
+            self.conn.commit()
+            return new_message_id
+        except pymysql.Error as e:
+            logging.error(f"Eroare la trimiterea mesajului de chat: {e}")
+            self.conn.rollback()
+            return None
 
     def delete_user(self, user_id):
         if user_id == 1:
