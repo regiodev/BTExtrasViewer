@@ -419,8 +419,8 @@ class ChatWindow:
         self.message_display.bind("<Leave>", self._hide_tooltip)
         
         self.message_display.tag_configure("read_receipt", foreground="blue", font=("Segoe UI", 8))
-        self.message_display.tag_configure("sent", justify="right", foreground="#006400")
-        self.message_display.tag_configure("received", justify="left", foreground="#00008B")
+        self.message_display.tag_configure("sent", justify="right", foreground="#006400", lmargin1=10, lmargin2=10, rmargin=10)
+        self.message_display.tag_configure("received", justify="left", foreground="#00008B", lmargin1=10, lmargin2=10, rmargin=10)
         self.message_display.tag_configure("date_separator", justify="center", foreground="gray", font=("Segoe UI", 8, "italic"))
         
         self.message_input = ttk.Entry(chat_frame, font=("Segoe UI", 10))
@@ -623,7 +623,6 @@ class ChatWindow:
         if ids_to_mark_as_read:
             self._mark_messages_as_read_in_db(ids_to_mark_as_read)
         
-        # Actualizăm starea "necitit" înainte de a re-desena lista
         self.unread_counts = self.db_handler.get_unread_message_counts(self.current_user['id'])
         self._populate_conversation_list()
         
@@ -632,18 +631,16 @@ class ChatWindow:
             return
 
         # --- ÎNCEPUT BLOC MODIFICAT ---
-        # Am combinat logica de afișare a datei și a mesajelor într-o singură buclă
-        # pentru a asigura ordinea corectă a elementelor.
+        # Păstrăm logica originală de a apela _display_message,
+        # dar adăugăm verificarea datei înainte de fiecare apel.
         
         last_message_date = None
-        active_conv_details = self.conversation_details.get(self.active_conversation_id)
-
         for msg in messages:
-            # Pas 1: Verificăm dacă trebuie să inserăm un separator de dată
+            # Pas 1: Verificăm dacă data s-a schimbat
             current_message_date = msg['timestamp'].date()
             if current_message_date != last_message_date:
+                # Dacă da, inserăm separatorul de dată direct în widget
                 date_str = current_message_date.strftime('%d %B %Y')
-                # Inserăm separatorul de dată, care este deja configurat să fie centrat
                 self.message_display.insert(tk.END, f"\n{date_str}\n", "date_separator")
                 last_message_date = current_message_date
             
@@ -651,35 +648,14 @@ class ChatWindow:
             if msg['id'] in ids_to_mark_as_read:
                 msg['stare'] = 'citit'
             
-            # Pas 3: Replicăm logica din _display_message direct aici
-            is_my_message = msg['id_expeditor_fk'] == self.current_user['id']
-            tag = "sent" if is_my_message else "received"
-            
-            prefix = ""
-            if active_conv_details and active_conv_details['tip_conversatie'] == 'grup' and not is_my_message:
-                sender_name = (msg['expeditor'] or "Utilizator").split(' ')[0]
-                prefix = f"{sender_name}:\n"
-            
-            start_index = self.message_display.index(tk.END)
-            
-            formatted_message = f"{prefix}{msg['continut_mesaj']}"
-            self.message_display.insert(tk.END, formatted_message, tag)
-            
-            if is_my_message and msg['stare'] == 'citit':
-                self.message_display.insert(tk.END, " ✓", "read_receipt")
-            
-            self.message_display.insert(tk.END, "\n\n", "line_spacing")
-            
-            end_index = self.message_display.index(tk.END)
-            start_line = int(start_index.split('.')[0])
-            end_line = int(end_index.split('.')[0])
-            for i in range(start_line, end_line + 1):
-                 self.line_to_message_map[str(i)] = msg
-        
+            # Pas 3: Apelăm funcția originală pentru a afișa mesajul.
+            # Aceasta va gestiona starea (bifa) exact ca înainte.
+            self._display_message(msg)
         # --- SFÂRȘIT BLOC MODIFICAT ---
 
-        self.message_display.see(tk.END)
         self.message_display.config(state="disabled")
+        # Am eliminat self.message_display.see(tk.END) de aici, deoarece
+        # este deja apelat în interiorul _display_message.
 
     def _populate_conversation_list(self):
         """
