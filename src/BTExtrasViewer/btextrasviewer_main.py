@@ -407,76 +407,39 @@ class BTViewerApp:
         self.refresh_ui_for_account_change()
            
     def show_cash_flow_report(self):
-        if not (self.db_handler and self.db_handler.is_connected()):
-            messagebox.showwarning("Fără Conexiune", "Vă rugăm asigurați o conexiune la baza de date pentru a genera rapoarte.", parent=self.master)
-            return
-        
-        if not self.accounts_list:
-            messagebox.showwarning("Fără Conturi", "Nu există conturi definite pentru a genera rapoarte.", parent=self.master)
-            return
-
+        if not (self.db_handler and self.db_handler.is_connected()): messagebox.showwarning("Fără Conexiune", "Vă rugăm asigurați o conexiune la baza de date pentru a genera rapoarte.", parent=self.master); return
+        if not self.accounts_list: messagebox.showwarning("Fără Conturi", "Nu există conturi definite pentru a genera rapoarte.", parent=self.master); return
         start_date, end_date = None, None
-
         if self.date_range_mode_var.get():
             try:
-                if hasattr(self, 'start_date') and self.start_date.get():
-                    start_date = self.start_date.get_date()
-                if hasattr(self, 'end_date') and self.end_date.get():
-                    end_date = self.end_date.get_date()
-            except Exception as e_get_date:
-                 logging.warning(f"Atenție: Nu s-au putut prelua datele din DateEntry: {e_get_date}")
+                if hasattr(self, 'start_date') and self.start_date.get(): start_date = self.start_date.get_date()
+                if hasattr(self, 'end_date') and self.end_date.get(): end_date = self.end_date.get_date()
+            except Exception as e_get_date: logging.warning(f"Atenție: Nu s-au putut prelua datele din DateEntry: {e_get_date}")
         else:
             if self.nav_selected_year:
                 current_year, current_month, current_day = self.nav_selected_year, self.nav_selected_month_index, self.nav_selected_day
-                
-                if current_month == 0:
-                    start_date = date(current_year, 1, 1)
-                    end_date = date(current_year, 12, 31)
+                if current_month == 0: start_date, end_date = date(current_year, 1, 1), date(current_year, 12, 31)
                 else:
-                    if current_day == 0:
-                        _, num_days = calendar.monthrange(current_year, current_month)
-                        start_date = date(current_year, current_month, 1)
-                        end_date = date(current_year, current_month, num_days)
-                    else:
-                        start_date = end_date = date(current_year, current_month, current_day)
-
+                    if current_day == 0: _, num_days = calendar.monthrange(current_year, current_month); start_date, end_date = date(current_year, current_month, 1), date(current_year, current_month, num_days)
+                    else: start_date = end_date = date(current_year, current_month, current_day)
         if not start_date or not end_date:
-            row = self.db_handler.fetch_one_dict(
-                "SELECT MIN(data) as min_d, MAX(data) as max_d FROM tranzactii WHERE id_cont_fk = %s", 
-                (self.active_account_id,)
-            )
-            if row:
-                start_date = row.get('min_d') or date.today()
-                end_date = row.get('max_d') or date.today()
-            else:
-                start_date = end_date = date.today()
+            row = self.db_handler.fetch_one_dict("SELECT MIN(data) as min_d, MAX(data) as max_d FROM tranzactii WHERE id_cont_fk = %s", (self.active_account_id,))
+            if row: start_date, end_date = row.get('min_d') or date.today(), row.get('max_d') or date.today()
+            else: start_date = end_date = date.today()
+        initial_context = {'active_account_id': self.active_account_id, 'start_date': start_date, 'end_date': end_date, 'visible_tx_codes': self.visible_tx_codes, 'tranzactie_acces': self.current_user.get('tranzactie_acces', 'toate')}
+        # << MODIFICARE: Adăugăm 'current_user' >>
+        CashFlowReportDialog(self.master, self.db_handler, self.accounts_list, initial_context=initial_context, smtp_config=self.smtp_config, current_user=self.current_user)
 
-        initial_context = {
-            'active_account_id': self.active_account_id,
-            'start_date': start_date,
-            'end_date': end_date,
-            'visible_tx_codes': self.visible_tx_codes,
-            'tranzactie_acces': self.current_user.get('tranzactie_acces', 'toate')
-        }
-        
-        report_dialog = CashFlowReportDialog(self.master, self.db_handler, self.accounts_list, initial_context=initial_context, smtp_config=self.smtp_config)
-    
     def show_balance_report(self):
-        if not (self.db_handler and self.db_handler.is_connected()):
-            messagebox.showwarning("Fără Conexiune", "Vă rugăm asigurați o conexiune la baza de date.", parent=self.master)
-            return
-
-        if not self.accounts_list:
-            messagebox.showwarning("Fără Conturi", "Nu există conturi definite pentru a genera rapoarte.", parent=self.master)
-            return
-
+        if not (self.db_handler and self.db_handler.is_connected()): messagebox.showwarning("Fără Conexiune", "Vă rugăm asigurați o conexiune la baza de date.", parent=self.master); return
+        if not self.accounts_list: messagebox.showwarning("Fără Conturi", "Nu există conturi definite pentru a genera rapoarte.", parent=self.master); return
         config_dialog = BalanceReportConfigDialog(self.master, self, self.accounts_list)
-
         if config_dialog.result:
             report_config = config_dialog.result
             report_config['visible_tx_codes'] = self.visible_tx_codes
             report_config['tranzactie_acces'] = self.current_user.get('tranzactie_acces', 'toate')
-            BalanceEvolutionReportDialog(self.master, self.db_handler, self.smtp_config, report_config)
+            # << MODIFICARE: Adăugăm 'current_user' >>
+            BalanceEvolutionReportDialog(self.master, self.db_handler, self.smtp_config, report_config, current_user=self.current_user)
 
     def _populate_audit_log_tab(self):
         if not hasattr(self, 'audit_log_tree'): return
@@ -489,52 +452,26 @@ class BTViewerApp:
                 self.audit_log_tree.insert("", "end", values=values)
 
     def show_transaction_analysis_report(self):
-        if not (self.db_handler and self.db_handler.is_connected()):
-            messagebox.showwarning("Fără Conexiune", "Vă rugăm asigurați o conexiune la baza de date.", parent=self.master)
-            return
-
-        if not self.accounts_list:
-            messagebox.showwarning("Fără Conturi", "Nu există conturi definite pentru a genera rapoarte.", parent=self.master)
-            return
-
+        if not (self.db_handler and self.db_handler.is_connected()): messagebox.showwarning("Fără Conexiune", "Vă rugăm asigurați o conexiune la baza de date.", parent=self.master); return
+        if not self.accounts_list: messagebox.showwarning("Fără Conturi", "Nu există conturi definite pentru a genera rapoarte.", parent=self.master); return
         start_date, end_date = None, None
         if self.date_range_mode_var.get():
             try:
-                if hasattr(self, 'start_date') and self.start_date.get():
-                    start_date = self.start_date.get_date()
-                if hasattr(self, 'end_date') and self.end_date.get():
-                    end_date = self.end_date.get_date()
-            except Exception as e:
-                logging.warning(f"Atenție: Nu s-au putut prelua datele din DateEntry: {e}")
+                if hasattr(self, 'start_date') and self.start_date.get(): start_date = self.start_date.get_date()
+                if hasattr(self, 'end_date') and self.end_date.get(): end_date = self.end_date.get_date()
+            except Exception as e: logging.warning(f"Atenție: Nu s-au putut prelua datele din DateEntry: {e}")
         else:
             if self.nav_selected_year:
                 current_year, current_month, current_day = self.nav_selected_year, self.nav_selected_month_index, self.nav_selected_day
-                if current_month == 0:
-                    start_date, end_date = date(current_year, 1, 1), date(current_year, 12, 31)
-                elif current_day == 0:
-                    _, num_days = calendar.monthrange(current_year, current_month)
-                    start_date, end_date = date(current_year, current_month, 1), date(current_year, current_month, num_days)
-                else:
-                    start_date = end_date = date(current_year, current_month, current_day)
-
-        if not start_date or not end_date:
-            start_date, end_date = date.today().replace(day=1, month=1), date.today()
-
+                if current_month == 0: start_date, end_date = date(current_year, 1, 1), date(current_year, 12, 31)
+                elif current_day == 0: _, num_days = calendar.monthrange(current_year, current_month); start_date, end_date = date(current_year, current_month, 1), date(current_year, current_month, num_days)
+                else: start_date = end_date = date(current_year, current_month, current_day)
+        if not start_date or not end_date: start_date, end_date = date.today().replace(day=1, month=1), date.today()
         active_account = next((acc for acc in self.accounts_list if acc['id_cont'] == self.active_account_id), None)
         currency = active_account.get('valuta', 'RON') if active_account else 'RON'
-
-        initial_context = {
-            'active_account_id': self.active_account_id,
-            'start_date': start_date,
-            'end_date': end_date,
-            'visible_tx_codes': self.visible_tx_codes,
-            'accounts_list': self.accounts_list,
-            'db_handler': self.db_handler,
-            'currency': currency,
-            'tranzactie_acces': self.current_user.get('tranzactie_acces', 'toate')
-        }
-
-        TransactionAnalysisReportDialog(self.master, self.db_handler, initial_context, self.smtp_config)
+        initial_context = {'active_account_id': self.active_account_id, 'start_date': start_date, 'end_date': end_date, 'visible_tx_codes': self.visible_tx_codes, 'accounts_list': self.accounts_list, 'db_handler': self.db_handler, 'currency': currency, 'tranzactie_acces': self.current_user.get('tranzactie_acces', 'toate')}
+        # << MODIFICARE: Adăugăm 'current_user' >>
+        TransactionAnalysisReportDialog(self.master, self.db_handler, initial_context, self.smtp_config, current_user=self.current_user)
 
     # =========================================================================
     # METODA MODIFICATĂ PENTRU A CORESPUNDE CU NOUL DB_HANDLER

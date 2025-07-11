@@ -50,6 +50,7 @@ Name: "desktopicon_chat"; Description: "Creează o iconiță pe Desktop pentru C
 [Files]
 Source: "src\assets\BT_logo.ico"; DestDir: "{app}\assets"; Components: core or viewer
 Source: "src\assets\BTExtrasChat.ico"; DestDir: "{app}\assets"; Components: chat
+Source: "src\assets\logo_companie.png"; DestDir: "{app}\assets"; Components: core or viewer
 
 Source: "dist\BTExtras Suite\*"; DestDir: "{app}"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "dist\BTExtrasViewer\*"; DestDir: "{app}\BTExtrasViewer"; Components: viewer; Flags: ignoreversion recursesubdirs createallsubdirs

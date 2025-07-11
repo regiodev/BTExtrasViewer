@@ -1,48 +1,16 @@
 # src/BTExtrasViewer/email_composer.py
 from datetime import datetime
 
-def create_export_summary_html(user_data, filter_summary, company_name, logo_cid):
-    """
-    Generează corpul HTML profesional pentru emailul de notificare a exportului.
+# Paleta de culori globală
+HEADER_COLOR = "#005A9E"  # Albastru închis
+BG_COLOR = "#F4F7F9"      # Un gri foarte deschis
+TABLE_HEADER_BG = "#EAECEE"
+TEXT_COLOR = "#34495E"
+BORDER_COLOR = "#D5DBDB"
 
-    :param user_data: Dicționar cu datele utilizatorului autentificat.
-    :param filter_summary: Dicționar cu filtrele aplicate la momentul exportului.
-    :param company_name: Numele companiei (hard-coded).
-    :param logo_cid: Content-ID pentru logo-ul atașat.
-    :return: Un string conținând corpul HTML al emailului.
-    """
-
-    # Paleta de culori inspirată de logo-ul companiei (un albastru închis corporativ)
-    HEADER_COLOR = "#005A9E"  # Albastru închis
-    BG_COLOR = "#F4F7F9"      # Un gri foarte deschis
-    TABLE_HEADER_BG = "#EAECEE"
-    TEXT_COLOR = "#34495E"
-    BORDER_COLOR = "#D5DBDB"
-
-    # Extragem datele utilizatorului pentru semnătură
-    sender_name = user_data.get('nume_complet') or user_data.get('username', 'Utilizator BTExtras')
-    sender_role = ", ".join(user_data.get('roles_list', ['Utilizator']))
-    sender_email = user_data.get('smtp_sender_email', 'Nespecificat')
-
-    # Construim sumarul filtrelor într-un format lizibil
-    filter_lines = []
-    if filter_summary.get('date_range_mode'):
-        filter_lines.append(f"<li><b>Interval de date:</b> De la {filter_summary.get('start_date', 'N/A')} până la {filter_summary.get('end_date', 'N/A')}</li>")
-    else:
-        filter_lines.append(f"<li><b>Perioadă Navigare:</b> {filter_summary.get('nav_selection', 'Toate tranzacțiile')}</li>")
-
-    filter_lines.append(f"<li><b>Tip Tranzacție:</b> {filter_summary.get('type', 'Toate')}</li>")
-    if filter_summary.get('search_term'):
-        filter_lines.append(f"<li><b>Termen Căutat:</b> '{filter_summary['search_term']}' în '{filter_summary['search_column']}'</li>")
-
-    filters_html = "\n".join(filter_lines)
-
-    # Compunem documentul HTML
-    html_body = f"""
-    <!DOCTYPE html>
-    <html lang="ro">
-    <head>
-        <meta charset="UTF-8">
+def _get_base_styles():
+    """Returnează stilurile CSS de bază pentru template-urile de email."""
+    return f"""
         <style>
             body {{ font-family: Arial, sans-serif; background-color: {BG_COLOR}; color: {TEXT_COLOR}; margin: 0; padding: 20px; }}
             .container {{ background-color: #ffffff; border: 1px solid {BORDER_COLOR}; border-radius: 8px; max-width: 680px; margin: auto; overflow: hidden; }}
@@ -59,6 +27,60 @@ def create_export_summary_html(user_data, filter_summary, company_name, logo_cid
             .logo-cell img {{ width: 70px; height: auto; }}
             .sender-details-cell {{ padding-left: 15px; vertical-align: top; }}
         </style>
+    """
+
+def _generate_signature_html(user_data, company_name, logo_cid):
+    """Generează blocul de semnătură HTML."""
+    sender_name = user_data.get('nume_complet') or user_data.get('username', 'Utilizator BTExtras')
+    # Asigurăm că roles_list există, chiar dacă nu a fost populată anterior
+    sender_role = ", ".join(user_data.get('roles_list', ['Utilizator']))
+    sender_email = user_data.get('smtp_sender_email', 'Nespecificat')
+
+    return f"""
+    <div class="footer">
+        <table class="signature-table">
+            <tr>
+                <td class="logo-cell">
+                    <img src="cid:{logo_cid}" alt="Company Logo">
+                </td>
+                <td class="sender-details-cell">
+                    <strong>{sender_name}</strong><br>
+                    {sender_role}<br>
+                    {company_name}<br>
+                    Email: {sender_email}
+                </td>
+            </tr>
+        </table>
+        <p style="text-align: center; margin-top: 20px;">Email generat automat la data de {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}.</p>
+    </div>
+    """
+
+def create_export_summary_html(user_data, filter_summary, company_name, logo_cid):
+    """
+    Generează corpul HTML profesional pentru emailul de notificare a exportului Excel.
+    """
+    # Construim sumarul filtrelor într-un format lizibil
+    filter_lines = []
+    if filter_summary.get('date_range_mode'):
+        filter_lines.append(f"<li><b>Interval de date:</b> De la {filter_summary.get('start_date', 'N/A')} până la {filter_summary.get('end_date', 'N/A')}</li>")
+    else:
+        filter_lines.append(f"<li><b>Perioadă Navigare:</b> {filter_summary.get('nav_selection', 'Toate tranzacțiile')}</li>")
+
+    filter_lines.append(f"<li><b>Tip Tranzacție:</b> {filter_summary.get('type', 'Toate')}</li>")
+    if filter_summary.get('search_term'):
+        filter_lines.append(f"<li><b>Termen Căutat:</b> '{filter_summary['search_term']}' în '{filter_summary['search_column']}'</li>")
+
+    filters_html = "\n".join(filter_lines)
+    signature_html = _generate_signature_html(user_data, company_name, logo_cid)
+    styles = _get_base_styles()
+
+    # Compunem documentul HTML
+    html_body = f"""
+    <!DOCTYPE html>
+    <html lang="ro">
+    <head>
+        <meta charset="UTF-8">
+        {styles}
     </head>
     <body>
         <div class="container">
@@ -78,22 +100,47 @@ def create_export_summary_html(user_data, filter_summary, company_name, logo_cid
                 
                 <p>Documentul atașat conține toate tranzacțiile care corespund acestor criterii de filtrare la data generării.</p>
             </div>
-            <div class="footer">
-                <table class="signature-table">
-                    <tr>
-                        <td class="logo-cell">
-                            <img src="cid:{logo_cid}" alt="Company Logo">
-                        </td>
-                        <td class="sender-details-cell">
-                            <strong>{sender_name}</strong><br>
-                            {sender_role}<br>
-                            {company_name}<br>
-                            Email: {sender_email}
-                        </td>
-                    </tr>
-                </table>
-                <p style="text-align: center; margin-top: 20px;">Email generat automat la data de {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}.</p>
+            {signature_html}
+        </div>
+    </body>
+    </html>
+    """
+    return html_body
+
+def create_report_delivery_html(user_data, report_name, company_name, logo_cid):
+    """
+    Generează corpul HTML profesional pentru emailul de livrare a unui raport PDF.
+    """
+    signature_html = _generate_signature_html(user_data, company_name, logo_cid)
+    styles = _get_base_styles()
+
+    # Compunem documentul HTML
+    html_body = f"""
+    <!DOCTYPE html>
+    <html lang="ro">
+    <head>
+        <meta charset="UTF-8">
+        {styles}
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>Raport Financiar - {company_name}</h1>
             </div>
+            <div class="content">
+                <p>Bună ziua,</p>
+                <p>Atașat acestui email găsiți raportul solicitat, în format PDF.</p>
+                
+                <h2>Detalii Raport</h2>
+                <div class="filter-summary">
+                    <ul>
+                        <li><b>Tip Raport:</b> {report_name}</li>
+                    </ul>
+                </div>
+                
+                <p>Acest raport a fost generat automat de aplicația <strong>BTExtras Suite</strong> conform parametrilor selectați.</p>
+            </div>
+            {signature_html}
         </div>
     </body>
     </html>

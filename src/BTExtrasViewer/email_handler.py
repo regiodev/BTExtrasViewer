@@ -9,22 +9,61 @@ from email.mime.image import MIMEImage
 from email import encoders
 import os
 import mimetypes
+import sys
 
-def send_report_email(smtp_config, recipient_email, subject, body, attachment_path):
+# Constanta pentru Content-ID-ul logo-ului
+LOGO_CID = 'btextras_logo_01'
+COMPANY_NAME = "SC Balneoclimaterica SRL"
+
+def get_logo_path():
+    """Helper pentru a determina calea corectă către logo."""
+    if getattr(sys, 'frozen', False):
+        # Calea în aplicația compilată (PyInstaller)
+        base_path = os.path.dirname(sys.executable)
+        # În structura compilată, assets este în directorul părinte al BTExtrasViewer.exe
+        return os.path.join(base_path, "..", "assets", "logo_companie.png")
+    else:
+        # Calea în timpul dezvoltării (rulare din sursă)
+        # Presupunem că email_handler.py este în src/BTExtrasViewer/
+        base_path = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(base_path, "..", "assets", "logo_companie.png")
+
+
+def send_report_email(smtp_config, recipient_email, subject, html_body, attachment_path):
     """
-    Construiește și trimite un email cu un atașament folosind setările SMTP furnizate.
-    Returnează un tuplu (success: bool, message: str).
+    MODIFICAT: Trimite un email cu un raport PDF atașat, folosind un corp HTML formatat și logo.
     """
     if not all(smtp_config.get(k) for k in ['server', 'port', 'user', 'password', 'sender_email']):
         return False, "Setările SMTP sunt incomplete. Vă rugăm configurați SMTP din meniu."
 
     try:
-        msg = MIMEMultipart()
+        # Folosim 'related' pentru a putea încorpora imagini în HTML
+        msg = MIMEMultipart('related')
         msg['From'] = smtp_config['sender_email']
         msg['To'] = recipient_email
         msg['Subject'] = subject
-        msg.attach(MIMEText(body, 'plain'))
 
+        # Creăm partea de conținut (HTML)
+        msg_alternative = MIMEMultipart('alternative')
+        msg.attach(msg_alternative)
+
+        # Fallback text simplu
+        plain_text_part = MIMEText("Acest email conține un raport atașat și necesită un client de email compatibil HTML.", 'plain')
+        msg_alternative.attach(plain_text_part)
+        
+        # Partea HTML (primită ca parametru)
+        html_part = MIMEText(html_body, 'html')
+        msg_alternative.attach(html_part)
+
+        # Atașăm logo-ul
+        logo_path = get_logo_path()
+        if logo_path and os.path.exists(logo_path):
+            with open(logo_path, 'rb') as f:
+                logo_img = MIMEImage(f.read())
+            logo_img.add_header('Content-ID', f'<{LOGO_CID}>')
+            msg.attach(logo_img)
+
+        # Atașăm fișierul PDF (din calea de pe disc)
         ctype, encoding = mimetypes.guess_type(attachment_path)
         if ctype is None or encoding is not None:
             ctype = 'application/octet-stream'
@@ -42,6 +81,7 @@ def send_report_email(smtp_config, recipient_email, subject, body, attachment_pa
         )
         msg.attach(part)
 
+        # Logica de trimitere (neschimbată)
         server = None
         security = smtp_config.get('security', 'SSL/TLS')
 
@@ -59,6 +99,7 @@ def send_report_email(smtp_config, recipient_email, subject, body, attachment_pa
         
         return True, "Emailul a fost trimis cu succes!"
 
+    # Gestionarea erorilor (neschimbată)
     except smtplib.SMTPAuthenticationError:
         return False, "Eroare de autentificare. Verificați utilizatorul și parola SMTP."
     except smtplib.SMTPServerDisconnected:
@@ -71,7 +112,7 @@ def send_report_email(smtp_config, recipient_email, subject, body, attachment_pa
 def send_email_with_memory_attachment(smtp_config, recipient_email, subject, html_body, attachment_buffer, attachment_filename, logo_path=None, logo_cid=None):
     """
     Trimite un email cu un corp HTML și un atașament din memorie (BytesIO).
-    Poate încorpora și o imagine (logo) în corpul emailului.
+    Această funcție rămâne neschimbată, fiind folosită pentru exporturile Excel.
     """
     if not all(smtp_config.get(k) for k in ['server', 'port', 'user', 'password', 'sender_email']):
         return False, "Setările SMTP sunt incomplete. Vă rugăm configurați SMTP din meniu."
@@ -96,6 +137,8 @@ def send_email_with_memory_attachment(smtp_config, recipient_email, subject, htm
         msg_alternative.attach(html_part)
 
         # Atașăm imaginea logo (dacă există) și o legăm prin Content-ID (cid)
+        # Folosim get_logo_path() pentru consistență
+        logo_path = get_logo_path() 
         if logo_path and logo_cid and os.path.exists(logo_path):
             with open(logo_path, 'rb') as f:
                 logo_img = MIMEImage(f.read())
@@ -138,6 +181,7 @@ def send_email_with_memory_attachment(smtp_config, recipient_email, subject, htm
 
 
 def test_smtp_connection(smtp_config):
+    # Funcția rămâne neschimbată
     if not all(smtp_config.get(k) for k in ['server', 'port', 'user', 'password']):
         return False, "Setările SMTP esențiale (server, port, user, parolă) sunt incomplete."
 

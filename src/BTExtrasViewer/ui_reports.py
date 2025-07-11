@@ -23,6 +23,8 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Image as Re
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from reportlab.lib.units import inch
+from BTExtrasViewer import email_composer
+from BTExtrasViewer.email_handler import send_report_email, LOGO_CID, COMPANY_NAME
 
 from .email_handler import send_report_email
 # Modulul de constante este acum în 'common'
@@ -41,17 +43,17 @@ CHART_SPINE_COLOR = '#bbbbbb'
 CHART_BG_COLOR = '#f0f0f0'
 
 class CashFlowReportDialog(tk.Toplevel):
-    def __init__(self, parent, db_handler, accounts_list, initial_context=None, smtp_config=None):
+    def __init__(self, parent, db_handler, accounts_list, initial_context=None, smtp_config=None, current_user=None):
         super().__init__(parent)
         self.db_handler = db_handler
         self.all_accounts = accounts_list
         self.initial_context = initial_context or {}
         self.visible_tx_codes = self.initial_context.get('visible_tx_codes', [])
         
-        # --- NOU: Salvăm permisiunea de acces la tranzacții ---
         self.tranzactie_acces = self.initial_context.get('tranzactie_acces', 'toate')
         
         self.smtp_config = smtp_config or {}
+        self.current_user = current_user # << LINIE ADĂUGATĂ
         
         self.title("Analiză Flux de Numerar (Cash Flow)")
         self.minsize(950, 650)
@@ -225,68 +227,53 @@ class CashFlowReportDialog(tk.Toplevel):
 
 
     def _on_send_email(self):
+        # Verificăm dacă există date de trimis, nu un fișier PDF
         if not hasattr(self, 'current_report_data') or not self.current_report_data:
-            messagebox.showwarning("Acțiune Anulată", "Vă rugăm mai întâi generați un raport.", parent=self)
+            messagebox.showwarning("Fără Date", "Nu există date de trimis. Vă rugăm generați un raport mai întâi.", parent=self)
             return
 
-        recipient = simpledialog.askstring("Adresă Destinatar", "Introduceți adresa de email a destinatarului:", parent=self)
+        if not self.smtp_config:
+            messagebox.showwarning("SMTP Neconfigurat", "Setările SMTP nu sunt disponibile.", parent=self)
+            return
+
+        recipient = simpledialog.askstring("Trimite Raport", "Introduceți adresa de email a destinatarului:", parent=self)
         if not recipient:
-            return
+            return  # Utilizatorul a anulat
 
+        temp_pdf_path = ""
         try:
-            account_name = self.account_var.get()
-            currency = self.current_report_currency
-            start_date_obj, end_date_obj = self.start_date_entry.get_date(), self.end_date_entry.get_date()
-            start_date_str, end_date_str = start_date_obj.strftime('%d.%m.%Y'), end_date_obj.strftime('%d.%m.%Y')
-            total_intrari, total_iesiri, sold_net = self.current_report_totals['intrari'], self.current_report_totals['iesiri'], self.current_report_totals['sold']
+            # Pas 1: Generăm PDF-ul într-o locație temporară
+            report_name = f"Raport_CashFlow_{self.account_var.get().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+            temp_pdf_path = os.path.join(tempfile.gettempdir(), report_name)
+            self._generate_pdf_file(temp_pdf_path) # Reutilizăm funcția existentă de generare PDF
 
-            f_intrari = f"{total_intrari:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            f_iesiri = f"{total_iesiri:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            f_sold = f"{sold_net:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            sign = '+' if sold_net >= 0 else ''
-        except Exception as e:
-            messagebox.showerror("Eroare Preluare Date", f"Nu s-au putut prelua datele pentru email: {e}", parent=self)
-            return
+            # Pas 2: Compunem emailul
+            subject = f"Raport Flux de Numerar (Cash Flow) - {self.account_var.get()}"
+            user_data = self.current_user if self.current_user else {}
+            user_data['smtp_sender_email'] = self.smtp_config.get('sender_email', 'nespecificat')
 
-        subject = f"Raport Flux de Numerar: {account_name} ({start_date_str} - {end_date_str})"
-        body = f"""Bună ziua,
+            html_body = email_composer.create_report_delivery_html(
+                user_data,
+                f"Flux de Numerar (Cash Flow) pentru contul {self.account_var.get()}",
+                COMPANY_NAME,
+                LOGO_CID
+            )
 
-    Atașat găsiți raportul de flux de numerar generat din aplicația {APP_NAME}.
-
-    --- SUMAR RAPORT ---
-    Perioada Raportată: {start_date_str} - {end_date_str}
-    Cont Bancar: {account_name}
-    Valută: {currency}
-    --------------------
-    Total Intrări: +{f_intrari} {currency}
-    Total Ieșiri: -{f_iesiri} {currency}
-    Sold Net: {sign}{f_sold} {currency}
-    --------------------
-
-    O zi bună,
-    Email generat automat de {APP_NAME} v{APP_VERSION}
-    """
-
-        temp_dir = tempfile.gettempdir()
-        temp_pdf_path = os.path.join(temp_dir, f"Raport_CashFlow_{account_name.replace(' ', '_')}_{date.today().strftime('%Y%m%d')}.pdf")
-        
-        try:
-            self._generate_pdf_file(temp_pdf_path)
-            success, message = send_report_email(self.smtp_config, recipient, subject, body, temp_pdf_path)
+            # Pasul 3: Trimitem emailul cu PDF-ul temporar
+            success, message = send_report_email(self.smtp_config, recipient, subject, html_body, temp_pdf_path)
 
             if success:
                 messagebox.showinfo("Succes", message, parent=self)
             else:
                 messagebox.showerror("Eroare Trimitere", message, parent=self)
+
         except Exception as e:
-            messagebox.showerror("Eroare Generare PDF", f"Nu s-a putut genera fișierul PDF pentru atașare:\n{e}", parent=self)
-            logging.error(f"Eroare la generare PDF pentru email (CashFlow): {e}", exc_info=True)
+            messagebox.showerror("Eroare", f"A apărut o eroare în timpul pregătirii emailului: {e}", parent=self)
+            logging.error(f"Eroare în _on_send_email (CashFlow): {e}", exc_info=True)
         finally:
-            if os.path.exists(temp_pdf_path):
-                try:
-                    os.remove(temp_pdf_path)
-                except OSError as e:
-                    logging.warning(f"Nu s-a putut șterge fișierul PDF temporar: {temp_pdf_path}. Eroare: {e}")
+            # Pasul 4: Ștergem fișierul temporar, indiferent de rezultat
+            if temp_pdf_path and os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
 
     def _apply_initial_context(self):
         logging.debug("DEBUG_CONTEXT: Se aplică contextul inițial în filtrele raportului.")
@@ -528,13 +515,13 @@ class CashFlowReportDialog(tk.Toplevel):
         self.canvas.draw()
 
 class BalanceEvolutionReportDialog(tk.Toplevel):
-    def __init__(self, parent, db_handler, smtp_config, report_config):
+    def __init__(self, parent, db_handler, smtp_config, report_config, current_user=None):
         super().__init__(parent)
         self.db_handler = db_handler
         self.smtp_config = smtp_config or {}
         self.report_config = report_config
+        self.current_user = current_user # << LINIE ADĂUGATĂ
         
-        # --- NOU: Salvăm permisiunea de acces la tranzacții ---
         self.tranzactie_acces = self.report_config.get('tranzactie_acces', 'toate')
         
         self.report_data = []
@@ -774,54 +761,59 @@ class BalanceEvolutionReportDialog(tk.Toplevel):
 
 
     def _on_send_email(self):
-        if not self.report_data: return
-        recipient = simpledialog.askstring("Adresă Destinatar", "Introduceți adresa de email a destinatarului:", parent=self)
-        if not recipient: return
+        if not self.report_data:
+            messagebox.showwarning("Fără Date", "Nu există date de trimis.", parent=self)
+            return
 
-        temp_dir = tempfile.gettempdir(); temp_pdf_path = os.path.join(temp_dir, f"Evolutie_Sold_{self.report_config['account_name'].replace(' ','_')}.pdf")
-        
+        if not self.smtp_config:
+            messagebox.showwarning("SMTP Neconfigurat", "Setările SMTP nu sunt disponibile.", parent=self)
+            return
+
+        recipient = simpledialog.askstring("Trimite Raport", "Introduceți adresa de email a destinatarului:", parent=self)
+        if not recipient:
+            return
+
+        temp_pdf_path = ""
         try:
+            # Pas 1: Generăm PDF-ul într-o locație temporară
+            report_name = f"Raport_Evolutie_Sold_{self.report_config['account_name'].replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+            temp_pdf_path = os.path.join(tempfile.gettempdir(), report_name)
             self._generate_pdf_file(temp_pdf_path)
+
+            # Pas 2: Compunem emailul
+            subject = f"Raport Evoluție Sold - {self.report_config['account_name']}"
+            user_data = self.current_user if self.current_user else {}
+            user_data['smtp_sender_email'] = self.smtp_config.get('sender_email', 'nespecificat')
             
-            start_date_str = self.report_config['start_date'].strftime('%d.%m.%Y')
-            end_date_str = self.report_config['end_date'].strftime('%d.%m.%Y')
-            
-            start_balance = f"{float(self.report_data[0]['sold_dupa_tranzactie']):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            end_balance = f"{float(self.report_data[-1]['sold_dupa_tranzactie']):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            currency = self.report_config['currency']
+            html_body = email_composer.create_report_delivery_html(
+                user_data,
+                f"Evoluție Sold pentru contul {self.report_config['account_name']}",
+                COMPANY_NAME,
+                LOGO_CID
+            )
 
-            subject = f"Evoluție Sold Cont: {self.report_config['account_name']} ({start_date_str} - {end_date_str})"
-            body = f"""Bună ziua,
+            # Pasul 3: Trimitem emailul
+            success, message = send_report_email(self.smtp_config, recipient, subject, html_body, temp_pdf_path)
 
-Atașat găsiți raportul privind evoluția soldului pentru contul {self.report_config['account_name']}.
+            if success:
+                messagebox.showinfo("Succes", message, parent=self)
+            else:
+                messagebox.showerror("Eroare Trimitere", message, parent=self)
 
---- SUMAR PERIOADĂ ---
-Perioada analizată: {start_date_str} - {end_date_str}
-Sold de început (aproximat): {start_balance} {currency}
-Sold de sfârșit: {end_balance} {currency}
---------------------
-
-O zi bună,
-Email generat automat de {APP_NAME} v{APP_VERSION}
-"""
-            success, message = send_report_email(self.smtp_config, recipient, subject, body, temp_pdf_path)
-            if success: messagebox.showinfo("Succes", message, parent=self)
-            else: messagebox.showerror("Eroare Trimitere", message, parent=self)
         except Exception as e:
-            messagebox.showerror("Eroare Critică", f"A apărut o eroare neașteptată:\n{e}", parent=self)
-            logging.error(f"Eroare la trimitere email (Evolutie Sold): {e}", exc_info=True)
+            messagebox.showerror("Eroare", f"A apărut o eroare în timpul pregătirii emailului: {e}", parent=self)
+            logging.error(f"Eroare în _on_send_email (BalanceEvolution): {e}", exc_info=True)
         finally:
-            if os.path.exists(temp_pdf_path):
-                try:
-                    os.remove(temp_pdf_path)
-                except OSError as e:
-                    logging.warning(f"Nu s-a putut șterge fișierul PDF temporar: {temp_pdf_path}. Eroare: {e}")
+            # Pasul 4: Ștergem fișierul temporar
+            if temp_pdf_path and os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
 
 class TransactionAnalysisReportDialog(tk.Toplevel):
-    def __init__(self, parent, db_handler, initial_context=None, smtp_config=None):
+    def __init__(self, parent, db_handler, initial_context=None, smtp_config=None, current_user=None):
         super().__init__(parent)
         self.db_handler = db_handler
         self.initial_context = initial_context or {}
+        self.current_user = current_user # << LINIE ADĂUGATĂ
         
         self.tranzactie_acces = self.initial_context.get('tranzactie_acces', 'toate')
         self.smtp_config = smtp_config or self.initial_context.get('smtp_config', {})
@@ -830,18 +822,15 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
         self.geometry("1100x750")
         self.transient(parent)
 
-        # Variabile de control pentru filtre
         self.granularity_var = tk.StringVar(value="Zilnic")
         self.type_var = tk.StringVar(value="Ambele")
         
-        # Atribute interne
         self.report_data = []
         self.transaction_type_vars = {}
         self.legend_desc_map = {}
         self.results_tree = None
         self.canvas = None
 
-        # Inițializăm sistemul de tooltip
         self.tooltip = tk.Toplevel(self)
         self.tooltip.withdraw()
         self.tooltip.overrideredirect(True)
@@ -850,18 +839,14 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
                                     font=(DIALOG_FONT_FAMILY, 9))
         self.tooltip_label.pack(ipadx=5, ipady=3)
         
-        # Construim widget-urile UI
         self._create_widgets()
 
-        # Legăm evenimentul de hover DUPĂ ce self.canvas a fost creat
         if self.canvas:
             self.canvas.mpl_connect('motion_notify_event', self._on_mouse_hover)
         
-        # --- BLOCUL CRUCIAL CARE RESTAUREAZĂ FUNCȚIONALITATEA ---
         self._populate_filters_with_initial_context()
-        self._setup_bindings() # Asigurăm legarea evenimentelor
-        self._schedule_report_update() # Pornim prima actualizare
-        # --- SFÂRȘIT BLOC ---
+        self._setup_bindings()
+        self._schedule_report_update()
 
         self.center_window()
         self.grab_set()
@@ -1366,52 +1351,50 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
             logging.error(f"Eroare la export Excel (Analiza Tranzactii): {e}", exc_info=True)
             
     def _on_send_email(self):
-        """Gestionează acțiunea de trimitere a raportului pe email."""
         if not self.report_data:
-            messagebox.showwarning("Acțiune Anulată", "Vă rugăm mai întâi generați un raport.", parent=self)
+            messagebox.showwarning("Fără Date", "Nu există date de trimis.", parent=self)
             return
 
-        recipient = simpledialog.askstring("Adresă Destinatar", "Introduceți adresa de email a destinatarului:", parent=self)
-        if not recipient: return
+        if not self.smtp_config:
+            messagebox.showwarning("SMTP Neconfigurat", "Setările SMTP nu sunt disponibile.", parent=self)
+            return
 
+        recipient = simpledialog.askstring("Trimite Raport", "Introduceți adresa de email a destinatarului:", parent=self)
+        if not recipient:
+            return
+
+        temp_pdf_path = ""
         try:
-            account_name = self.initial_context.get('account_name', 'N/A')
-            start_date_str = self.start_date_entry.get_date().strftime('%d.%m.%Y')
-            end_date_str = self.end_date_entry.get_date().strftime('%d.%m.%Y')
-            currency = self.initial_context.get('currency', 'RON')
-            
-            total_credit = sum(float(r['total_suma']) for r in self.report_data if r['tip'] == 'credit')
-            total_debit = sum(float(r['total_suma']) for r in self.report_data if r['tip'] == 'debit')
-            f_credit = f"{total_credit:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            f_debit = f"{total_debit:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
-            subject = f"Analiză Tranzacții: {account_name} ({start_date_str} - {end_date_str})"
-            body = f"""Bună ziua,\n\nAtașat găsiți raportul de analiză detaliată a tranzacțiilor generat din {APP_NAME}.\n
---- REZUMAT RAPORT ---
-Cont Analizat: {account_name}
-Perioada: {start_date_str} - {end_date_str}
-Tip Tranzacții: {self.type_var.get()}
-Granularitate: {self.granularity_var.get()}
---------------------
-Total Credit pe categorii: {f_credit} {currency}
-Total Debit pe categorii: {f_debit} {currency}
---------------------\n
-O zi bună,
-Email generat automat de {APP_NAME} v{APP_VERSION}
-"""
-
-            temp_dir = tempfile.gettempdir()
-            temp_pdf_path = os.path.join(temp_dir, f"Analiza_Tranzactii_{account_name.replace(' ', '_')}_{date.today().strftime('%Y%m%d')}.pdf")
-        
+            # Pas 1: Generăm PDF-ul într-o locație temporară
+            account_name = self.initial_context.get('account_name', 'Cont').replace(' ', '_')
+            report_name = f"Analiza_Tranzactii_{account_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+            temp_pdf_path = os.path.join(tempfile.gettempdir(), report_name)
             self._generate_pdf_file(temp_pdf_path)
-            success, message = send_report_email(self.smtp_config, recipient, subject, body, temp_pdf_path)
 
-            if success: messagebox.showinfo("Succes", message, parent=self)
-            else: messagebox.showerror("Eroare Trimitere", message, parent=self)
+            # Pas 2: Compunem emailul
+            subject = f"Raport Analiză Tranzacții - {self.initial_context.get('account_name', 'Cont')}"
+            user_data = self.current_user if self.current_user else {}
+            user_data['smtp_sender_email'] = self.smtp_config.get('sender_email', 'nespecificat')
+            
+            html_body = email_composer.create_report_delivery_html(
+                user_data,
+                f"Analiză Detaliată Tranzacții pentru contul {self.initial_context.get('account_name', 'N/A')}",
+                COMPANY_NAME,
+                LOGO_CID
+            )
+
+            # Pasul 3: Trimitem emailul
+            success, message = send_report_email(self.smtp_config, recipient, subject, html_body, temp_pdf_path)
+
+            if success:
+                messagebox.showinfo("Succes", message, parent=self)
+            else:
+                messagebox.showerror("Eroare Trimitere", message, parent=self)
+
         except Exception as e:
-            messagebox.showerror("Eroare Critică", f"A apărut o eroare neașteptată:\n{e}", parent=self)
-            logging.error(f"Eroare la trimitere email (Analiza Tranzactii): {e}", exc_info=True)
+            messagebox.showerror("Eroare", f"A apărut o eroare în timpul pregătirii emailului: {e}", parent=self)
+            logging.error(f"Eroare în _on_send_email (TransactionAnalysis): {e}", exc_info=True)
         finally:
-            if os.path.exists(temp_pdf_path):
-                try: os.remove(temp_pdf_path)
-                except OSError as e: logging.warning(f"Nu s-a putut șterge fișierul PDF temporar: {temp_pdf_path}. Eroare: {e}")
+            # Pasul 4: Ștergem fișierul temporar
+            if temp_pdf_path and os.path.exists(temp_pdf_path):
+                os.remove(temp_pdf_path)
