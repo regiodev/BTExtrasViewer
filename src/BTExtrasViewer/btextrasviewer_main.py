@@ -1,5 +1,6 @@
 # btextrasviewer_main.py
 
+import io
 import os
 import logging
 import configparser
@@ -19,6 +20,13 @@ import base64
 import argparse
 import time
 
+from BTExtrasViewer.file_processing import (
+    extract_iban_from_mt940, threaded_import_worker, 
+    threaded_export_worker, threaded_export_to_memory_worker
+)
+from BTExtrasViewer.email_handler import send_email_with_memory_attachment
+
+from BTExtrasViewer import email_composer
 from BTExtrasViewer.ui_help import HelpDialog # Adăugați această linie
 from common.app_constants import CHAT_COMMAND_PORT, VIEWER_COMMAND_PORT, SESSION_COMMAND_PORT, VIEWER_LOCK_PORT
 
@@ -546,6 +554,10 @@ class BTViewerApp:
             if self.has_permission('view_audit_log'): self._populate_audit_log_tab()
 
     def setup_ui(self):
+        """
+        MODIFICAT: Butoanele de raportare au fost eliminate de pe bara de acțiuni.
+        A fost adăugat noul buton "Trimite Export pe Email".
+        """
         default_font_size = 10
         default_font_family = 'TkDefaultFont'
         
@@ -602,17 +614,20 @@ class BTViewerApp:
 
         action_buttons_frame = tk.Frame(row1_frame)
         action_buttons_frame.pack(side=tk.RIGHT)
-        self.report_button = tk.Button(action_buttons_frame, text="Analiză Cash Flow", command=self.show_cash_flow_report, font=(default_font_family, default_font_size, 'bold'), relief=tk.RAISED, borderwidth=2, background="#D5F5E3", activebackground="#BDECB6")
-        self.report_button.pack(side=tk.LEFT, padx=(0, 5))
 
-        self.balance_report_button = tk.Button(action_buttons_frame, text="Evoluție Sold", command=self.show_balance_report, font=(default_font_family, default_font_size, 'bold'), relief=tk.RAISED, borderwidth=2, background="#D4E6F1", activebackground="#A9CCE3")
-        self.balance_report_button.pack(side=tk.LEFT, padx=5)
+        # << ELIMINARE BUTOANE RAPORTARE >>
+        # self.report_button = tk.Button(action_buttons_frame, text="Analiză Cash Flow", ...)
+        # self.balance_report_button = tk.Button(action_buttons_frame, text="Evoluție Sold", ...)
+        # self.analysis_button = tk.Button(action_buttons_frame, text="Analiză Tranzacții", ...)
 
-        self.analysis_button = tk.Button(action_buttons_frame, text="Analiză Tranzacții", command=self.show_transaction_analysis_report, font=(default_font_family, default_font_size, 'bold'), relief=tk.RAISED, borderwidth=2, background="#FEF9E7", activebackground="#FDEBD0")
-        self.analysis_button.pack(side=tk.LEFT, padx=5)
-
+        # Butoanele rămase
         self.export_button = tk.Button(action_buttons_frame, text="Exportă în Excel", command=self.export_to_excel, font=(default_font_family, default_font_size), relief=tk.RAISED, borderwidth=2)
         self.export_button.pack(side=tk.LEFT, padx=5)
+
+        # << BUTON NOU ADAUGAT >>
+        self.email_export_button = tk.Button(action_buttons_frame, text="Trimite Export pe Email", command=self._on_email_export, font=(default_font_family, default_font_size), relief=tk.RAISED, borderwidth=2, background="#FDF2E9", activebackground="#FAE5D3")
+        self.email_export_button.pack(side=tk.LEFT, padx=5)
+        
         self.import_button = tk.Button(action_buttons_frame, text="Importă fișier MT940", command=self.import_mt940, font=(default_font_family, default_font_size), relief=tk.RAISED, borderwidth=2)
         self.import_button.pack(side=tk.LEFT, padx=5)
 
@@ -647,10 +662,7 @@ class BTViewerApp:
         self.search_entry.pack(side=tk.LEFT)
         self.search_entry.bind("<KeyRelease>", self.schedule_search)
         ttk.Label(row2_frame, text="în:").pack(side=tk.LEFT, padx=(5,2))
-        searchable_columns = [
-            "Toate coloanele", "Dată", "Descriere", "Observații", 
-            "Sumă", "Tip", "CIF", "Factură", "Beneficiar"
-        ]
+        searchable_columns = ["Toate coloanele", "Dată", "Descriere", "Observații", "Sumă", "Tip", "CIF", "Factură", "Beneficiar"]
         self.search_column_combo = ttk.Combobox(row2_frame, textvariable=self.search_column_var, values=searchable_columns, width=15, state="readonly", font=(default_font_family, default_font_size))
         self.search_column_combo.pack(side=tk.LEFT, padx=(0,10))
         self.search_column_combo.bind("<<ComboboxSelected>>", self._on_search_column_changed)
@@ -664,21 +676,15 @@ class BTViewerApp:
         self.tree = ttk.Treeview(transactions_tab, columns=self.treeview_display_columns, show="headings", style="Treeview")
         self.tree.tag_configure('credit_row', background='#E6FFE6')
         self.tree.tag_configure('debit_row', background='#FFE6E6')
-       
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar = ttk.Scrollbar(transactions_tab, orient="vertical", command=self.tree.yview)
         scrollbar.pack(side=tk.RIGHT, fill="y")
         self.tree.configure(yscrollcommand=scrollbar.set)
-
         default_widths = {"data": 80, "descriere": 300, "observatii": 200, "suma": 90, "tip": 60, "cif": 80, "factura": 80, "beneficiar": 180}
-
         for col in self.treeview_display_columns:
             width = self.loaded_column_widths.get(col, default_widths.get(col, 100))
-            
-            # Aici este modificarea: definim alinierea pe baza numelui coloanei
             anchor_pos = "e" if col == "suma" else "center" if col == "tip" else "w"
             self.tree.column(col, anchor=anchor_pos, width=width, minwidth=40)
-
             header_text = col.upper() if col == 'cif' else col.capitalize().replace("_", " ")
             self.tree.heading(col, text=header_text, command=lambda c=col: self.toggle_sort(c))
         
@@ -688,43 +694,21 @@ class BTViewerApp:
             main_content_notebook.add(history_tab, text=" Istoric Importuri ")
             history_cols = ("fisier", "data", "utilizator", "noi", "ignorate", "cont")
             self.history_tree = ttk.Treeview(history_tab, columns=history_cols, show="headings")
-            self.history_tree.heading("fisier", text="Nume Fișier")
-            self.history_tree.heading("data", text="Data Import")
-            self.history_tree.heading("utilizator", text="Utilizator")
-            self.history_tree.heading("noi", text="Tranzacții Noi")
-            self.history_tree.heading("ignorate", text="Tranzacții Ignorate")
-            self.history_tree.heading("cont", text="Importat în Contul")
-            self.history_tree.column("fisier", width=250); self.history_tree.column("data", width=150)
-            self.history_tree.column("utilizator", width=120, anchor='w')
-            self.history_tree.column("noi", width=120, anchor='center'); self.history_tree.column("ignorate", width=130, anchor='center')
-            self.history_tree.column("cont", width=200)
+            self.history_tree.heading("fisier", text="Nume Fișier"); self.history_tree.heading("data", text="Data Import"); self.history_tree.heading("utilizator", text="Utilizator"); self.history_tree.heading("noi", text="Tranzacții Noi"); self.history_tree.heading("ignorate", text="Tranzacții Ignorate"); self.history_tree.heading("cont", text="Importat în Contul")
+            self.history_tree.column("fisier", width=250); self.history_tree.column("data", width=150); self.history_tree.column("utilizator", width=120, anchor='w'); self.history_tree.column("noi", width=120, anchor='center'); self.history_tree.column("ignorate", width=130, anchor='center'); self.history_tree.column("cont", width=200)
             history_scrollbar = ttk.Scrollbar(history_tab, orient="vertical", command=self.history_tree.yview)
             self.history_tree.configure(yscrollcommand=history_scrollbar.set)
             self.history_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             history_scrollbar.pack(side=tk.RIGHT, fill="y")
-
-        # Verificăm dacă utilizatorul are permisiunea de a vedea jurnalul
         if self.has_permission('view_audit_log'):
             audit_log_tab = ttk.Frame(main_content_notebook)
             main_content_notebook.add(audit_log_tab, text=" Jurnal Acțiuni ")
             audit_cols = ("timestamp", "username", "actiune", "detalii")
             self.audit_log_tree = ttk.Treeview(audit_log_tab, columns=audit_cols, show="headings")
-            
-            # Setăm antetele și dimensiunile coloanelor
-            self.audit_log_tree.heading("timestamp", text="Dată și Oră")
-            self.audit_log_tree.heading("username", text="Utilizator")
-            self.audit_log_tree.heading("actiune", text="Acțiune")
-            self.audit_log_tree.heading("detalii", text="Detalii")
-            
-            self.audit_log_tree.column("timestamp", width=160, anchor="w")
-            self.audit_log_tree.column("username", width=120, anchor="w")
-            self.audit_log_tree.column("actiune", width=180, anchor="w")
-            self.audit_log_tree.column("detalii", width=400, anchor="w")
-            
-            # Adăugăm scrollbar
+            self.audit_log_tree.heading("timestamp", text="Dată și Oră"); self.audit_log_tree.heading("username", text="Utilizator"); self.audit_log_tree.heading("actiune", text="Acțiune"); self.audit_log_tree.heading("detalii", text="Detalii")
+            self.audit_log_tree.column("timestamp", width=160, anchor="w"); self.audit_log_tree.column("username", width=120, anchor="w"); self.audit_log_tree.column("actiune", width=180, anchor="w"); self.audit_log_tree.column("detalii", width=400, anchor="w")
             audit_scrollbar = ttk.Scrollbar(audit_log_tab, orient="vertical", command=self.audit_log_tree.yview)
             self.audit_log_tree.configure(yscrollcommand=audit_scrollbar.set)
-            
             self.audit_log_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             audit_scrollbar.pack(side=tk.RIGHT, fill="y")
         
@@ -746,9 +730,163 @@ class BTViewerApp:
         self.sold_label = ttk.Label(totals_frame, text="0.00 RON", font=(default_font_family, default_font_size, 'bold'))
         self.sold_label.grid(row=0, column=5, sticky="w", padx=5)
         
-        self.action_buttons = [self.report_button, self.balance_report_button, self.analysis_button, self.export_button, self.import_button, self.reset_button]
+        # << Actualizăm lista de butoane de acțiune >>
+        self.action_buttons = [self.export_button, self.email_export_button, self.import_button, self.reset_button]
         self._toggle_action_buttons('disabled')
         self._on_search_column_changed()
+
+    def _on_email_export(self):
+        """
+        Orchestrează procesul de trimitere a exportului pe email.
+        """
+        if not (self.db_handler and self.db_handler.is_connected() and self.active_account_id):
+            messagebox.showwarning("Fără Conexiune / Cont", "Vă rugăm selectați un cont și asigurați o conexiune la baza de date.", parent=self.master)
+            return
+        
+        # Verificăm dacă setările SMTP sunt configurate
+        if not self.smtp_config or not all(self.smtp_config.get(k) for k in ['server', 'port', 'user', 'password', 'sender_email']):
+            messagebox.showwarning("SMTP Neconfigurat", "Funcționalitatea de trimitere a emailurilor necesită configurarea setărilor SMTP.\n\nVă rugăm accesați meniul 'Administrare' -> 'Configurează SMTP (Email)...' pentru a le seta.", parent=self.master)
+            return
+
+        recipient_email = simpledialog.askstring("Adresă Destinatar", "Introduceți adresa de email a destinatarului:", parent=self.master)
+        if not recipient_email or '@' not in recipient_email:
+            if recipient_email is not None: # User didn't press cancel
+                messagebox.showwarning("Adresă Invalidă", "Vă rugăm introduceți o adresă de email validă.", parent=self.master)
+            return
+
+        self._toggle_action_buttons('disabled')
+        self.current_progress_win, self.current_progress_bar, self.current_progress_status_label_widget = \
+            file_processing.create_progress_window(self.master, "Trimitere Email", "Se pregătește trimiterea...")
+        if self.current_progress_bar and self.current_progress_bar.winfo_exists():
+            self.current_progress_bar.config(mode='indeterminate')
+            self.current_progress_bar.start(10)
+
+        self.email_export_thread = threading.Thread(target=self._threaded_send_export_worker, args=(recipient_email,))
+        self.email_export_thread.daemon = True
+        self.email_export_thread.start()
+        self.master.after(100, self._check_email_export_progress)
+
+    def _threaded_send_export_worker(self, recipient_email):
+        """
+        Funcția executată în background pentru a genera și trimite emailul.
+        """
+        try:
+            # Pasul 1: Construim query-ul și parametrii pentru export
+            self.queue.put(("status", "Se colectează datele filtrate..."))
+            select_clause_export = "data, descriere, observatii, suma, tip, cif, factura, beneficiar"
+            query = f"SELECT {select_clause_export} FROM tranzactii WHERE id_cont_fk = %s"
+            params = [self.active_account_id]
+            
+            start_date_for_export, end_date_for_export = None, None
+            if self.date_range_mode_var.get():
+                if hasattr(self, 'start_date') and self.start_date.get(): start_date_for_export = self.start_date.get_date()
+                if hasattr(self, 'end_date') and self.end_date.get(): end_date_for_export = self.end_date.get_date()
+            elif self.nav_selected_year is not None:
+                current_year, current_month, current_day = self.nav_selected_year, self.nav_selected_month_index, self.nav_selected_day
+                if current_month == 0: start_date_for_export, end_date_for_export = date(current_year, 1, 1), date(current_year, 12, 31)
+                else:
+                    if current_day == 0: _, num_days = calendar.monthrange(current_year, current_month); start_date_for_export, end_date_for_export = date(current_year, current_month, 1), date(current_year, current_month, num_days)
+                    else: start_date_for_export = end_date_for_export = date(current_year, current_month, current_day)
+            
+            if start_date_for_export: query += " AND data >= %s"; params.append(start_date_for_export.strftime('%Y-%m-%d'))
+            if end_date_for_export: query += " AND data <= %s"; params.append(end_date_for_export.strftime('%Y-%m-%d'))
+            if self.type_var.get() != "Toate": query += " AND tip = %s"; params.append(self.type_var.get())
+            if self.search_var.get():
+                col_map = {"Beneficiar": "beneficiar", "CIF": "cif", "Factura": "factura", "Descriere": "descriere", "Observatii": "observatii"}
+                search_col_key = self.search_column_var.get(); search_col = col_map.get(search_col_key, "descriere")
+                query += f" AND {search_col} LIKE %s"; params.append(f"%{self.search_var.get()}%")
+
+            sort_col_export, sort_dir_export = self.sort_column, self.sort_direction
+            query += f" ORDER BY {sort_col_export} {sort_dir_export}, id ASC"
+
+            # Pasul 2: Generăm fișierul Excel în memorie
+            self.queue.put(("status", "Se generează fișierul Excel..."))
+            success_export, excel_buffer = file_processing.threaded_export_to_memory_worker(self.db_handler.db_credentials, query, tuple(params))
+            if not success_export:
+                raise ValueError(excel_buffer) # excel_buffer conține mesajul de eroare
+
+            # Pasul 3: Construim corpul emailului
+            self.queue.put(("status", "Se compune emailul..."))
+            filter_summary = {
+                'date_range_mode': self.date_range_mode_var.get(),
+                'start_date': start_date_for_export.strftime('%d.%m.%Y') if start_date_for_export else 'N/A',
+                'end_date': end_date_for_export.strftime('%d.%m.%Y') if end_date_for_export else 'N/A',
+                'nav_selection': self.nav_tree.item(self.nav_tree.focus(), 'text').strip() if (hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists() and self.nav_tree.focus()) else 'Toate',
+                'type': self.type_var.get(),
+                'search_term': self.search_var.get(),
+                'search_column': self.search_column_var.get()
+            }
+            
+            user_roles_raw = self.db_handler.fetch_all_dict("SELECT r.nume_rol FROM roluri r JOIN utilizatori_roluri ur ON r.id = ur.id_rol WHERE ur.id_utilizator = %s", (self.current_user['id'],))
+            user_info = self.current_user.copy()
+            user_info['roles_list'] = [role['nume_rol'] for role in user_roles_raw] if user_roles_raw else ['N/A']
+            user_info['smtp_sender_email'] = self.smtp_config.get('sender_email', 'nespecificat')
+            
+            logo_cid = 'btextras_logo_01'
+            html_body = email_composer.create_export_summary_html(user_info, filter_summary, "SC Balneoclimaterica SRL", logo_cid)
+
+            # Pasul 4: Trimitem emailul
+            self.queue.put(("status", "Se trimite emailul..."))
+            base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+            logo_path = os.path.join(base_path, "..", "assets", "logo_companie.png")
+            
+            attachment_filename = f"Export_{self.account_combo_var.get().replace(' ', '_')}_{date.today().strftime('%Y-%m-%d')}.xlsx"
+
+            success_send, message = send_email_with_memory_attachment(
+                self.smtp_config, recipient_email, f"Export Date: {self.account_combo_var.get()}",
+                html_body, excel_buffer, attachment_filename, logo_path, logo_cid
+            )
+
+            if success_send:
+                self.queue.put(("done", "email_export", message, recipient_email))
+            else:
+                raise ConnectionError(message)
+
+        except Exception as e:
+            logging.error(f"EROARE în _threaded_send_export_worker: {e}", exc_info=True)
+            self.queue.put(("error", "email_export", f"Eroare în procesul de trimitere:\n{e}", None))
+
+    def _check_email_export_progress(self):
+        """
+        Monitorizează coada pentru mesaje de la thread-ul de trimitere a emailului.
+        Versiune corectată care gestionează diferitele tipuri de mesaje.
+        """
+        try:
+            msg = self.queue.get_nowait()
+            msg_type = msg[0]
+
+            if msg_type == "status":
+                # Mesaj de status: actualizăm doar eticheta de progres
+                status_text = msg[1]
+                if self.current_progress_status_label_widget and self.current_progress_status_label_widget.winfo_exists():
+                    self.current_progress_status_label_widget.config(text=status_text)
+                # Continuăm să verificăm coada
+                if self.master.winfo_exists():
+                    self.master.after(100, self._check_email_export_progress)
+            
+            elif msg_type == "done":
+                # Mesaj de finalizare cu succes
+                operation_type, message, recipient_email = msg[1], msg[2], msg[3]
+                if operation_type == "email_export":
+                    if self.db_handler:
+                        log_details = f"Export trimis pe email către '{recipient_email}' pentru contul '{self.account_combo_var.get()}'."
+                        self.db_handler.log_action(self.current_user['id'], self.current_user['username'], "Trimitere Export Email", log_details)
+                    self._finalize_background_task(message, True, "email_export")
+
+            elif msg_type == "error":
+                # Mesaj de eroare
+                operation_type, error_message, _ = msg[1], msg[2], msg[3] # Ignorăm al patrulea element (recipient)
+                if operation_type == "email_export":
+                    self._finalize_background_task(error_message, False, "email_export")
+                    
+        except Empty:
+            # Coada este goală, verificăm dacă thread-ul încă rulează
+            if hasattr(self, 'email_export_thread') and self.email_export_thread and self.email_export_thread.is_alive():
+                if self.master.winfo_exists():
+                    self.master.after(100, self._check_email_export_progress)
+        except Exception as e:
+            logging.error(f"Eroare în _check_email_export_progress: {e}", exc_info=True)
+            self._finalize_background_task(f"Eroare neașteptată în UI: {e}", False, "email_export")
 
     def _setup_nav_tree_columns(self):
         self.nav_tree.column("#0", width=200, minwidth=180, stretch=tk.YES)
@@ -2164,7 +2302,7 @@ class BTViewerApp:
             window_to_close.destroy()
 
     def _toggle_action_buttons(self, state_str):
-        """Versiune actualizată care folosește chei de permisiuni granulare."""
+        """Versiune actualizată care folosește chei de permisiuni granulare și nu mai face referire la butoanele de raportare eliminate."""
         is_db_connected = self.db_handler and self.db_handler.is_connected()
         is_account_active = is_db_connected and self.active_account_id is not None
         
@@ -2174,20 +2312,19 @@ class BTViewerApp:
                 self.account_selector_combo.config(state=account_combo_state)
             except tk.TclError: pass
 
+        # << MODIFICARE: Dicționarul de permisiuni a fost curățat >>
         # Maparea butoanelor la permisiunile lor specifice
         button_permissions = {
-            self.report_button: 'run_report_cashflow',
-            self.balance_report_button: 'run_report_balance_evolution',
-            self.analysis_button: 'run_report_transaction_analysis',
             self.export_button: 'export_data',
+            self.email_export_button: 'export_data', # Folosește aceeași permisiune ca exportul standard
             self.import_button: 'import_files'
         }
 
         for btn, perm_key in button_permissions.items():
             if isinstance(btn, (tk.Button, ttk.Button)) and btn.winfo_exists():
                 try:
-                    # Butonul de import nu necesită cont activ, celelalte da
-                    req_account = (btn != self.import_button)
+                    # Butonul de import și cel de email nu necesită cont activ, cel de export da
+                    req_account = (btn == self.export_button)
                     can_enable = (is_account_active or not req_account) and is_db_connected
                     
                     final_state = tk.NORMAL if can_enable and self.has_permission(perm_key) else tk.DISABLED
@@ -2199,27 +2336,12 @@ class BTViewerApp:
                 self.reset_button.config(state=tk.NORMAL if is_account_active else tk.DISABLED)
             except tk.TclError: pass
 
+        # Dacă starea generală este 'disabled' (ex: în timpul unei operațiuni), forțăm dezactivarea tuturor
         if state_str == 'disabled':
              for btn in self.action_buttons:
                 if isinstance(btn, (tk.Button, ttk.Button)) and btn.winfo_exists():
                     try: btn.config(state=tk.DISABLED)
                     except tk.TclError: pass
-                
-        # 4. Gestionăm butonul de resetare filtre
-        # Acesta ar trebui să fie activ dacă un cont este activ, pentru a avea ce reseta.
-        if hasattr(self, 'reset_button') and self.reset_button.winfo_exists():
-            try:
-                self.reset_button.config(state=tk.NORMAL if is_account_active else tk.DISABLED)
-            except tk.TclError:
-                pass
-
-        # Dacă starea generală este 'disabled' (ex: în timpul unei operațiuni), forțăm dezactivarea
-        if state_str == 'disabled':
-             for btn in self.action_buttons:
-                if isinstance(btn, (tk.Button, ttk.Button)) and btn.winfo_exists():
-                    try: btn.config(state=tk.DISABLED)
-                    except tk.TclError: pass
-        # --- SFÂRȘIT BLOC MODIFICAT ---
 
     def _get_access_filter_sql(self):
         """Helper pentru a genera clauza SQL și parametrii pentru accesul la tranzacții."""

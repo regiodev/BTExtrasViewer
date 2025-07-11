@@ -13,6 +13,8 @@ from queue import Queue, Empty # Queue este folosit, Empty nu neapărat direct d
 from datetime import datetime
 import pymysql
 from sqlalchemy import create_engine
+import io
+
 
 # Expresii regulate
 RE_IBAN_EXTRACT = re.compile(r"([A-Z]{2}[0-9]{2}[A-Z0-9]{11,30})")
@@ -320,3 +322,87 @@ def threaded_export_worker(app_instance, query_str, query_params, file_path_expo
     finally:
         if engine:
             engine.dispose()
+
+def threaded_export_to_memory_worker(db_credentials, query_str, query_params):
+    """
+    Funcție nouă, adaptată. Generează un fișier Excel în memorie.
+    Returnează un tuplu: (success: bool, result: BytesIO sau str).
+    """
+    engine = None
+    try:
+        db_uri = (
+            f"mysql+pymysql://{db_credentials['user']}:{db_credentials['password']}"
+            f"@{db_credentials['host']}:{db_credentials['port']}/{db_credentials['database']}?charset=utf8mb4"
+        )
+        engine = create_engine(db_uri)
+
+        df = pd.read_sql_query(query_str, engine, params=query_params)
+        df.fillna('', inplace=True)
+
+        if 'data' in df.columns:
+            df['data'] = pd.to_datetime(df['data']).dt.date
+        
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='openpyxl', date_format='YYYY-MM-DD') as writer:
+            df.to_excel(writer, index=False, sheet_name='Tranzactii')
+            ws = writer.sheets['Tranzactii']
+
+            # Logica de formatare este identică cu funcția originală
+            header_font = Font(name='Calibri', size=11, bold=True, color='FFFFFF')
+            header_fill = PatternFill(start_color='4F81BD', fill_type='solid')
+            header_alignment = Alignment(horizontal='center', vertical='center')
+            body_font = Font(name='Calibri', size=11)
+            thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+            credit_fill = PatternFill(start_color='E6F4EA', fill_type='solid')
+            debit_fill = PatternFill(start_color='FDE6E6', fill_type='solid')
+            align_right = Alignment(horizontal='right', vertical='center')
+            align_left_vertical_center = Alignment(horizontal='left', vertical='center')
+
+            try:
+                tip_col_index = df.columns.get_loc('tip') + 1
+            except KeyError:
+                tip_col_index = -1
+
+            for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=ws.max_row), start=1):
+                is_header = (row_idx == 1)
+                row_fill = None
+                if not is_header and tip_col_index != -1:
+                    cell_value = ws.cell(row=row_idx, column=tip_col_index).value
+                    if cell_value == 'credit': row_fill = credit_fill
+                    elif cell_value == 'debit': row_fill = debit_fill
+                
+                for cell in row:
+                    cell.border = thin_border
+                    if is_header:
+                        cell.font = header_font; cell.fill = header_fill; cell.alignment = header_alignment
+                    else:
+                        cell.font = body_font
+                        if row_fill: cell.fill = row_fill
+                        if isinstance(cell.value, (int, float)):
+                            cell.number_format = '#,##0.00'
+                            cell.alignment = align_right
+                        else:
+                            cell.alignment = align_left_vertical_center
+            
+            for i, column_cells in enumerate(ws.columns, start=1):
+                max_length = len(str(ws.cell(row=1, column=i).value))
+                column_letter = get_column_letter(i)
+                for cell in column_cells:
+                    try:
+                        if len(str(cell.value)) > max_length: max_length = len(str(cell.value))
+                    except: pass
+                adjusted_width = (max_length + 2) if max_length < 48 else 50
+                ws.column_dimensions[column_letter].width = adjusted_width
+
+            ws.freeze_panes = 'A2'
+            ws.auto_filter.ref = ws.dimensions
+
+        # Mutăm cursorul la începutul buffer-ului pentru a putea fi citit
+        excel_buffer.seek(0)
+        return True, excel_buffer
+
+    except Exception as e:
+        logging.error(f"EROARE la generarea Excel în memorie: {e}", exc_info=True)
+        return False, f"Eroare la generarea fișierului Excel:\n{e}"
+    finally:
+        if engine: engine.dispose()
