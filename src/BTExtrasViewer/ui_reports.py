@@ -890,6 +890,7 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
         ttk.Label(filter_row1, text="Granularitate Listă:").pack(side="left", padx=(0, 5))
         self.granularity_combo = ttk.Combobox(filter_row1, textvariable=self.granularity_var, values=["Zilnic", "Lunar", "Anual"], state="readonly", width=12)
         self.granularity_combo.pack(side="left")
+        self.granularity_combo.bind("<<ComboboxSelected>>", self._schedule_report_update)
 
         checkbutton_container_frame = ttk.LabelFrame(filter_panel, text="Coduri Tranzacție (Filtru Listă și Grafic)")
         checkbutton_container_frame.pack(fill="x", pady=5)
@@ -984,7 +985,6 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
         """Leagă evenimentele widget-urilor de funcția de actualizare."""
         self.start_date_entry.bind("<<DateEntrySelected>>", self._schedule_report_update)
         self.end_date_entry.bind("<<DateEntrySelected>>", self._schedule_report_update)
-        self.granularity_combo.bind("<<ComboboxSelected>>", self._schedule_report_update)
         self.type_combo.bind("<<ComboboxSelected>>", self._schedule_report_update)
         # Checkbutton-urile își apelează funcția direct prin parametrul 'command',
         # deci nu au nevoie de .bind() aici.
@@ -1092,9 +1092,14 @@ class TransactionAnalysisReportDialog(tk.Toplevel):
             self.send_email_button.config(state="disabled")
             return
 
-        if granularity == "Zilnic": select_period_col, group_by_period = "data", "data"
-        elif granularity == "Lunar": select_period_col, group_by_period = "DATE_FORMAT(data, '%Y-%m')", "perioada"
-        else: select_period_col, group_by_period = "YEAR(data)", "perioada"
+        if granularity == "Zilnic": 
+            select_period_col, group_by_period = "data", "data"
+        elif granularity == "Lunar": 
+            # Corecție: group_by_period este acum expresia completă
+            select_period_col, group_by_period = "DATE_FORMAT(data, '%Y-%m')", "DATE_FORMAT(data, '%Y-%m')"
+        else: # Anual
+            # Corecție: group_by_period este acum expresia completă pentru robustețe maximă
+            select_period_col, group_by_period = "YEAR(data)", "YEAR(data)"
 
         sql = f"SELECT {select_period_col} as perioada, cod_tranzactie_fk, tip, SUM(suma) as total_suma, COUNT(*) as nr_tranzactii FROM tranzactii WHERE id_cont_fk = %s AND data BETWEEN %s AND %s"
         params = [self.initial_context['active_account_id'], start_date, end_date]
