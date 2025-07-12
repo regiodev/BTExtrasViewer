@@ -191,15 +191,9 @@ class BTViewerApp:
                 'y': self.master.winfo_y()
             }
 
-    def _show_help_dialog(self, initial_tab_name=None):
-        """Deschide fereastra de ajutor, opțional la un tab specific."""
-        tab_map = {
-            "Introducere": 0, "Interfața Principală": 1, "Import & Export": 2, 
-            "Rapoarte": 3, "Utilizatori și Roluri": 4, "Chat & Comenzi Rapide": 5, 
-            "Despre": 6
-        }
-        initial_index = tab_map.get(initial_tab_name, 0)
-        HelpDialog(self.master, initial_tab=initial_index)
+    def _show_help_dialog(self, initial_topic_id='welcome'):
+        """Deschide fereastra de ajutor, opțional la un subiect specific."""
+        HelpDialog(self.master, initial_topic_id=initial_topic_id)
 
     def _refresh_application_data(self, refresh_accounts=False, refresh_transactions=True):
         """
@@ -280,6 +274,68 @@ class BTViewerApp:
 
         if self.master.winfo_exists():
             self.master.withdraw()
+
+    def _on_nav_tree_select(self, event=None):
+        if self._programmatic_change or self._applying_nav_selection: return
+
+        if self.date_range_mode_var.get():
+            self._programmatic_change = True
+            self.date_range_mode_var.set(False)
+            self._toggle_filter_mode()
+        else:
+            self._apply_nav_selection_to_datepickers_and_refresh()
+
+    def _on_nav_tree_expand_or_double_click(self, event=None, item_to_expand=None):
+        if not (hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists() and self.db_handler and self.db_handler.is_connected() and self.active_account_id): return
+        
+        item_id = item_to_expand or (self.nav_tree.focus() if self.nav_tree.winfo_exists() else None)
+        if not item_id or item_id.startswith("placeholder_"): return
+        
+        is_open_event = event is not None and hasattr(event, 'type') and str(event.type) == 'TreeviewOpen'
+
+        access_sql, access_params = self._get_access_filter_sql()
+        visibility_sql, visibility_params = self._get_visibility_filter_sql()
+        filter_sql = access_sql + visibility_sql
+
+        if item_id.startswith("year_") and "month" not in item_id:
+            year_str = item_id.split('_')[1]; year_val = int(year_str)
+            placeholder_iid = f"placeholder_months_{year_str}"
+            if self.nav_tree.exists(placeholder_iid):
+                self.nav_tree.delete(placeholder_iid)
+                query = f"SELECT DISTINCT MONTH(data) as luna FROM tranzactii WHERE YEAR(data) = %s AND id_cont_fk = %s {filter_sql} ORDER BY luna ASC"
+                params = [year_val, self.active_account_id] + access_params + visibility_params
+                months_dicts = self.db_handler.fetch_all_dict(query, tuple(params))
+                for month_dict in months_dicts:
+                    month_idx = month_dict['luna']
+                    query_count = f"SELECT COUNT(*) FROM tranzactii WHERE YEAR(data) = %s AND MONTH(data) = %s AND id_cont_fk = %s {filter_sql}"
+                    params_count = [year_val, month_idx, self.active_account_id] + access_params + visibility_params
+                    month_tx_count = self.db_handler.fetch_scalar(query_count, tuple(params_count)) or 0
+                    if month_tx_count > 0:
+                        month_name = self.reverse_month_map_for_nav.get(month_idx, f"Luna {month_idx}")
+                        month_iid = f"{item_id}_month_{month_idx:02d}"
+                        self.nav_tree.insert(item_id, "end", text=f"  {month_name} ({month_tx_count} tranzacții)", iid=month_iid, open=False, tags=('month_node',))
+                        self.nav_tree.insert(month_iid, "end", text="    (Încarcă zile...)", iid=f"placeholder_days_{year_str}_{month_idx:02d}", tags=('day_node',))
+
+        elif "month" in item_id:
+            parts = item_id.split('_'); year_val, month_idx = int(parts[1]), int(parts[3])
+            placeholder_iid = f"placeholder_days_{year_val}_{month_idx:02d}"
+            if self.nav_tree.exists(placeholder_iid):
+                self.nav_tree.delete(placeholder_iid)
+                query = f"SELECT DISTINCT DAY(data) as zi FROM tranzactii WHERE YEAR(data) = %s AND MONTH(data) = %s AND id_cont_fk = %s {filter_sql} ORDER BY zi ASC"
+                params = [year_val, month_idx, self.active_account_id] + access_params + visibility_params
+                days_dicts = self.db_handler.fetch_all_dict(query, tuple(params))
+                for day_dict in days_dicts:
+                    day_val = day_dict['zi']
+                    query_count_day = f"SELECT COUNT(*) FROM tranzactii WHERE YEAR(data) = %s AND MONTH(data) = %s AND DAY(data) = %s AND id_cont_fk = %s {filter_sql}"
+                    params_count_day = [year_val, month_idx, day_val, self.active_account_id] + access_params + visibility_params
+                    day_tx_count = self.db_handler.fetch_scalar(query_count_day, tuple(params_count_day)) or 0
+                    if day_tx_count > 0:
+                        day_display_text = f"    {day_val:02d} ({day_tx_count} tranzacții)"
+                        day_iid = f"{item_id}_day_{day_val:02d}"
+                        self.nav_tree.insert(item_id, "end", text=day_display_text, iid=day_iid, tags=('day_node',))
+
+        if not is_open_event and self.nav_tree.exists(item_id):
+            self.nav_tree.item(item_id, open=not self.nav_tree.item(item_id, "open"))
 
     def _show_window(self):
         """Readuce fereastra în prim-plan și îi dă focus."""
@@ -492,8 +548,8 @@ class BTViewerApp:
 
     def setup_ui(self):
         """
-        MODIFICAT: Butoanele de raportare au fost eliminate de pe bara de acțiuni.
-        A fost adăugat noul buton "Trimite Export pe Email".
+        MODIFICAT: Textul butoanelor și al filtrelor a fost ajustat.
+        Lățimea unor combobox-uri a fost redusă pentru un aspect mai compact.
         """
         default_font_size = 10
         default_font_family = 'TkDefaultFont'
@@ -527,7 +583,7 @@ class BTViewerApp:
         self.nav_tree = ttk.Treeview(nav_frame_container, show="tree", selectmode="browse", style="nav.Treeview")
         self.nav_tree.pack(fill=tk.BOTH, expand=True, padx=2, pady=(0,5))
         self._setup_nav_tree_columns() 
-        self.nav_tree.bind("<<TreeviewSelect>>", self._on_nav_tree_select)
+        self.nav_tree.bind("<<TreeviewSelect>>", self._on_nav_select)
         self.nav_tree.bind("<<TreeviewOpen>>", self._on_nav_tree_expand_or_double_click)
         self.nav_tree.bind("<Double-1>", self._on_nav_tree_expand_or_double_click)
         
@@ -552,20 +608,16 @@ class BTViewerApp:
         action_buttons_frame = tk.Frame(row1_frame)
         action_buttons_frame.pack(side=tk.RIGHT)
 
-        # << ELIMINARE BUTOANE RAPORTARE >>
-        # self.report_button = tk.Button(action_buttons_frame, text="Analiză Cash Flow", ...)
-        # self.balance_report_button = tk.Button(action_buttons_frame, text="Evoluție Sold", ...)
-        # self.analysis_button = tk.Button(action_buttons_frame, text="Analiză Tranzacții", ...)
-
-        # Butoanele rămase
-        self.export_button = tk.Button(action_buttons_frame, text="Exportă în Excel", command=self.export_to_excel, font=(default_font_family, default_font_size), relief=tk.RAISED, borderwidth=2)
+        # << MODIFICARE TEXT BUTON 1 >>
+        self.export_button = tk.Button(action_buttons_frame, text="Export Excel", command=self.export_to_excel, font=(default_font_family, default_font_size), relief=tk.RAISED, borderwidth=2)
         self.export_button.pack(side=tk.LEFT, padx=5)
 
-        # << BUTON NOU ADAUGAT >>
-        self.email_export_button = tk.Button(action_buttons_frame, text="Trimite Export pe Email", command=self._on_email_export, font=(default_font_family, default_font_size), relief=tk.RAISED, borderwidth=2, background="#FDF2E9", activebackground="#FAE5D3")
+        # << MODIFICARE TEXT BUTON 2 >>
+        self.email_export_button = tk.Button(action_buttons_frame, text="Export pe email", command=self._on_email_export, font=(default_font_family, default_font_size), relief=tk.RAISED, borderwidth=2, background="#FDF2E9", activebackground="#FAE5D3")
         self.email_export_button.pack(side=tk.LEFT, padx=5)
         
-        self.import_button = tk.Button(action_buttons_frame, text="Importă fișier MT940", command=self.import_mt940, font=(default_font_family, default_font_size), relief=tk.RAISED, borderwidth=2)
+        # << MODIFICARE TEXT BUTON 3 >>
+        self.import_button = tk.Button(action_buttons_frame, text="Import extrase", command=self.import_mt940, font=(default_font_family, default_font_size), relief=tk.RAISED, borderwidth=2)
         self.import_button.pack(side=tk.LEFT, padx=5)
 
         self.chat_button = tk.Button(action_buttons_frame, text="Chat", command=self._launch_or_show_chat, font=(default_font_family, default_font_size, 'bold'), relief=tk.RAISED, borderwidth=2, background="#E8DAEF", activebackground="#D2B4DE")
@@ -573,36 +625,41 @@ class BTViewerApp:
 
         row2_frame = tk.Frame(top_controls_container)
         row2_frame.pack(fill=tk.X, expand=True, pady=(5,0))
-        self.date_range_checkbox = tk.Checkbutton(row2_frame, text="Interval Dată Specific:", variable=self.date_range_mode_var, command=self._toggle_filter_mode, font=(default_font_family, default_font_size))
+        
+        # << MODIFICARE TEXT CHECKBOX >>
+        self.date_range_checkbox = tk.Checkbutton(row2_frame, text="Interval data:", variable=self.date_range_mode_var, command=self._toggle_filter_mode, font=(default_font_family, default_font_size))
         self.date_range_checkbox.pack(side=tk.LEFT, padx=(0,10))
+        
         ttk.Label(row2_frame, text="De la:").pack(side=tk.LEFT, padx=(0, 2))
         self.start_date = DateEntry(row2_frame, date_pattern='yyyy-mm-dd', width=12, state='disabled', font=(default_font_family, default_font_size))
         self.start_date.pack(side=tk.LEFT, padx=(0,5))
         self.start_date.bind("<<DateEntrySelected>>", self.on_date_picker_change)
+        
         ttk.Label(row2_frame, text="Până la:").pack(side=tk.LEFT, padx=(5, 2))
         self.end_date = DateEntry(row2_frame, date_pattern='yyyy-mm-dd', width=12, state='disabled', font=(default_font_family, default_font_size))
         self.end_date.pack(side=tk.LEFT, padx=(0,10))
         self.end_date.bind("<<DateEntrySelected>>", self.on_date_picker_change)
+        
         ttk.Label(row2_frame, text="Tip:").pack(side=tk.LEFT)
-        self.type_combo = ttk.Combobox(row2_frame, textvariable=self.type_var, values=["Toate", "credit", "debit"], width=10, state="readonly", font=(default_font_family, default_font_size))
+        # << MODIFICARE LĂȚIME COMBOBOX TIP >>
+        self.type_combo = ttk.Combobox(row2_frame, textvariable=self.type_var, values=["Toate", "credit", "debit"], width=8, state="readonly", font=(default_font_family, default_font_size))
         self.type_combo.pack(side=tk.LEFT, padx=(2,10))
         self.type_combo.bind("<<ComboboxSelected>>", self.on_filter_change)
         
-        self.exact_search_checkbox = ttk.Checkbutton(
-            row2_frame, 
-            text="Căutare exactă:", 
-            variable=self.exact_search_var, 
-            command=self.on_filter_change,
-        )
+        self.exact_search_checkbox = ttk.Checkbutton(row2_frame, text="Căutare exactă:", variable=self.exact_search_var, command=self.on_filter_change)
         self.exact_search_checkbox.pack(side=tk.LEFT, padx=(10, 5))
+        
         self.search_entry = ttk.Entry(row2_frame, textvariable=self.search_var, width=20, font=(default_font_family, default_font_size))
         self.search_entry.pack(side=tk.LEFT)
         self.search_entry.bind("<KeyRelease>", self.schedule_search)
+        
         ttk.Label(row2_frame, text="în:").pack(side=tk.LEFT, padx=(5,2))
         searchable_columns = ["Toate coloanele", "Dată", "Descriere", "Observații", "Sumă", "Tip", "CIF", "Factură", "Beneficiar"]
-        self.search_column_combo = ttk.Combobox(row2_frame, textvariable=self.search_column_var, values=searchable_columns, width=15, state="readonly", font=(default_font_family, default_font_size))
+        # << MODIFICARE LĂȚIME COMBOBOX CĂUTARE >>
+        self.search_column_combo = ttk.Combobox(row2_frame, textvariable=self.search_column_var, values=searchable_columns, width=16, state="readonly", font=(default_font_family, default_font_size))
         self.search_column_combo.pack(side=tk.LEFT, padx=(0,10))
         self.search_column_combo.bind("<<ComboboxSelected>>", self._on_search_column_changed)
+        
         self.reset_button = ttk.Button(row2_frame, text="Resetează filtrele", command=self.reset_filters)
         self.reset_button.pack(side=tk.LEFT, padx=5)
         
@@ -667,7 +724,6 @@ class BTViewerApp:
         self.sold_label = ttk.Label(totals_frame, text="0.00 RON", font=(default_font_family, default_font_size, 'bold'))
         self.sold_label.grid(row=0, column=5, sticky="w", padx=5)
         
-        # << Actualizăm lista de butoane de acțiune >>
         self.action_buttons = [self.export_button, self.email_export_button, self.import_button, self.reset_button]
         self._toggle_action_buttons('disabled')
         self._on_search_column_changed()
@@ -877,10 +933,9 @@ class BTViewerApp:
         # --- Meniul Administrare (actualizat cu noile permisiuni) ---
         admin_menu = tk.Menu(menubar, tearoff=0, font=(default_font_family, default_font_size))
         
-        # --- MODIFICAT: Actualizăm lista de permisiuni care determină vizibilitatea meniului ---
         admin_permissions = [
             'manage_roles', 'manage_users', 'manage_accounts', 'manage_transaction_types',
-            'configure_db', 'configure_smtp'
+            'configure_db', 'configure_smtp', 'manage_swift_codes', 'manage_currencies'
         ]
         if any(self.has_permission(p) for p in admin_permissions):
             menubar.add_cascade(label="Administrare", menu=admin_menu)
@@ -890,9 +945,8 @@ class BTViewerApp:
         if self.has_permission('manage_users'):
             admin_menu.add_command(label="Gestionare Utilizatori...", command=self.manage_users)
         
-        # --- MODIFICARE: Logica separatorului rămâne validă ---
         if (self.has_permission('manage_roles') or self.has_permission('manage_users')) and \
-           (self.has_permission('manage_accounts') or self.has_permission('manage_transaction_types') or self.has_permission('configure_db') or self.has_permission('configure_smtp')):
+           (self.has_permission('manage_accounts') or self.has_permission('manage_transaction_types')):
             admin_menu.add_separator()
 
         if self.has_permission('manage_accounts'):
@@ -906,11 +960,10 @@ class BTViewerApp:
         if self.has_permission('manage_currencies'):
             admin_menu.add_command(label="Gestionare Valute...", command=self.manage_currencies)
 
-        if (self.has_permission('manage_roles') or self.has_permission('manage_users')) and \
-           (self.has_permission('manage_accounts') or self.has_permission('manage_transaction_types') or self.has_permission('configure_db') or self.has_permission('configure_smtp')):
+        if (self.has_permission('manage_accounts') or self.has_permission('manage_transaction_types') or self.has_permission('manage_swift_codes') or self.has_permission('manage_currencies')) and \
+           (self.has_permission('configure_db') or self.has_permission('configure_smtp')):
             admin_menu.add_separator()
 
-        # --- MODIFICAT: Folosim noile chei de permisiune ---
         if self.has_permission('configure_db'):
             admin_menu.add_command(label="Configurează Conexiunea DB...", command=self.handle_db_config_from_menu)
         if self.has_permission('configure_smtp'):
@@ -927,13 +980,13 @@ class BTViewerApp:
             if self.has_permission('run_report_transaction_analysis'):
                 reports_menu.add_command(label="Analiză Detaliată Tranzacții...", command=self.show_transaction_analysis_report)
     
-        # === START BLOC MENIU HELP ===
+        # === Meniul Help (cu comanda corectată) ===
         help_menu = tk.Menu(menubar, tearoff=0, font=(default_font_family, default_font_size))
         menubar.add_cascade(label="Ajutor", menu=help_menu)
-        help_menu.add_command(label="Afișează Ajutor...", command=self._show_help_dialog)
+        help_menu.add_command(label="Afișează Ghid de Utilizare...", command=self._show_help_dialog)
         help_menu.add_separator()
-        help_menu.add_command(label="Despre BTExtras Suite...", command=lambda: self._show_help_dialog(initial_tab_name="Despre"))
-        # === SFÂRȘIT BLOC MENIU HELP ===
+        # << MODIFICARE: Folosim 'initial_topic_id' și ID-ul corect 'about' >>
+        help_menu.add_command(label="Despre BTExtras Suite...", command=lambda: self._show_help_dialog(initial_topic_id="about"))
 
     def _on_account_selected(self, event=None):
         if self._prevent_on_account_selected_trigger: return
@@ -2045,14 +2098,29 @@ class BTViewerApp:
             self.nav_selected_month_index, self.nav_selected_day = 0, 0
             self.refresh_table()
 
-    def on_filter_change(self, event=None): self.refresh_table()
+    def on_filter_change(self, event=None):
+        self.refresh_table()
+
+    def _on_nav_select(self, event=None):
+        if self._programmatic_change or self._applying_nav_selection: return
+
+        if self.date_range_mode_var.get():
+            self._programmatic_change = True
+            self.date_range_mode_var.set(False)
+            self._toggle_filter_mode()
+        else:
+            self._apply_nav_selection_to_datepickers_and_refresh()
+    
     def schedule_search(self, event=None):
         if self.search_job: self.master.after_cancel(self.search_job)
         self.search_job = self.master.after(400, self.refresh_table)
 
     def toggle_sort(self, column_name):
-        if self.sort_column == column_name: self.sort_direction = 'ASC' if self.sort_direction == 'DESC' else 'DESC'
-        else: self.sort_column, self.sort_direction = column_name, ('ASC' if column_name != 'data' else 'DESC')
+        if self.sort_column == column_name:
+            self.sort_direction = 'ASC' if self.sort_direction == 'DESC' else 'DESC'
+        else:
+            self.sort_column = column_name
+            self.sort_direction = 'ASC' if column_name != 'data' else 'DESC'
         self.update_sort_indicator()
         self.refresh_table()
 

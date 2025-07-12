@@ -1,0 +1,50 @@
+BTExtras Suite – Licență Comercială
+Versiunea: v4.4.2
+Data emiterii: 03.07.2025
+==========================================
+
+1. TITULARUL LICENȚEI
+Regio Development SRL
+Str. Dealul Rotund nr. 5,
+Sovata, jud. Mureș, România
+Web: https://regio-cloud.ro/software
+Email: office@regio-development.ro
+
+2. OBIECTUL LICENȚEI
+Această licență reglementează utilizarea BTExtras Suite, o suită de aplicații software compusă din:
+ - BTExtrasViewer – vizualizare și export extrase MT940
+ - BTExtrasChat – comunicare internă pentru companii
+
+3. TIPUL ȘI NATURA LICENȚEI
+Software-ul este licențiat, nu vândut. Se acordă o licență comercială, netransferabilă, limitată și neexclusivă.
+
+4. DREPTURI ȘI RESTRICȚII
+Licențiatul ARE DREPTUL să:
+ - utilizeze software-ul intern/profesional;
+ - primească suport și actualizări (conform contractului);
+
+Licențiatului ÎI ESTE INTERZIS să:
+ - modifice sau decompileze software-ul;
+ - revândă sau distribuie;
+ - elimine elemente de identificare.
+
+5. PROPRIETATE INTELECTUALĂ
+Toate drepturile aparțin Regio Development SRL. Toate drepturile rezervate.
+
+6. LIMITAREA RĂSPUNDERII
+Software-ul este furnizat „ca atare”. Regio Development SRL nu răspunde pentru pierderi de date sau daune indirecte.
+
+7. CONFIDENȚIALITATE
+Licențiatul este obligat să păstreze confidențialitatea informațiilor tehnice și comerciale.
+
+8. ÎNCETAREA LICENȚEI
+Licența se reziliază automat la încălcarea condițiilor. Toate copiile software-ului trebuie distruse la reziliere.
+
+9. JURISDICȚIE
+Acordul este reglementat de legea română. Litigiile se soluționează în instanțele din România.
+
+10. CONTACT
+Email: office@regio-development.ro
+Web: https://regio-cloud.ro/software
+
+© Regio Development SRL. Reproducerea interzisă fără acord scris.

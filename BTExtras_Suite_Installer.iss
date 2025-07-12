@@ -4,12 +4,12 @@
 
 [Setup]
 AppName=BTExtras Suite
-AppVersion=4.5.1
+AppVersion=4.7.1
 AppPublisher=Regio Development
 
 ; 1. Adaugă acordul de licență care trebuie acceptat
-; Asigurați-vă că fișierul 'LICENSE.rtf' se află în același folder cu scriptul .iss
-LicenseFile=LICENSE.rtf
+; Asigurați-vă că fișierul 'LICENSE.txt' se află în același folder cu scriptul .iss
+LicenseFile=LICENSE.txt
 
 ; 2. Setează iconița pentru fișierul de instalare (setup.exe)
 SetupIconFile=src\assets\BT_logo.ico
@@ -23,7 +23,7 @@ DefaultDirName={autopf}\BTExtras Suite
 DefaultGroupName=BTExtras Suite
 PrivilegesRequired=admin
 OutputDir=Installer
-OutputBaseFilename=BTExtras_Suite_Setup_v4.5.1
+OutputBaseFilename=BTExtras_Suite_Setup_v4.7.1
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
