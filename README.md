@@ -1,4 +1,4 @@
-# BTExtras Suite v4.4.2
+# BTExtras Suite v4.7.1
 
 ![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
