@@ -7,8 +7,8 @@
 
 **BTExtras Suite** este o suită de aplicații desktop complexe, de tip client-server, destinată gestiunii, vizualizării și analizei extraselor de cont bancare, cu funcționalități integrate de comunicare securizată. Construită în Python, suita oferă o soluție multi-utilizator robustă, cu un sistem avansat de roluri și permisiuni, stocând datele într-o bază de date centralizată MariaDB/MySQL.
 
-![App Screenshot](https://user-images.githubusercontent.com/10636246/188358599-44755a60-e448-4e89-9e8c-52a5509a25b2.png)
-*(Notă: Imaginea de mai sus este un exemplu. Înlocuiți cu o captură de ecran reală a aplicației.)*
+![App Screenshot](https://github.com/regiodev/BTExtrasViewer/blob/main/viewer.png)
+*(Notă: Imaginea de mai sus este un exemplu.)*
 
 ---
 
