@@ -4,7 +4,7 @@
 
 [Setup]
 AppName=BTExtras Suite
-AppVersion=4.7.1
+AppVersion=4.7.2
 AppPublisher=Regio Development
 
 ; 1. Adaugă acordul de licență care trebuie acceptat
@@ -23,7 +23,7 @@ DefaultDirName={autopf}\BTExtras Suite
 DefaultGroupName=BTExtras Suite
 PrivilegesRequired=admin
 OutputDir=Installer
-OutputBaseFilename=BTExtras_Suite_Setup_v4.7.1
+OutputBaseFilename=BTExtras_Suite_Setup_v4.7.2
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern

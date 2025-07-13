@@ -14,7 +14,6 @@ import sys
 from common.app_constants import CHAT_COMMAND_PORT
 from common.db_handler import DatabaseHandler, get_new_db_connection
 
-# Am eliminat importurile pentru pystray și PIL
 
 class ChatWindow:
     def __init__(self, master, db_handler, user_data, db_creds):
