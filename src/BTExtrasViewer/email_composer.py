@@ -1,5 +1,7 @@
 # src/BTExtrasViewer/email_composer.py
+
 from datetime import datetime
+from common.app_constants import APP_NAME
 
 # Paleta de culori globală
 HEADER_COLOR = "#005A9E"  # Albastru închis
@@ -28,6 +30,38 @@ def _get_base_styles():
             .sender-details-cell {{ padding-left: 15px; vertical-align: top; }}
         </style>
     """
+
+def create_password_token_html(username, token):
+    """Generează corpul HTML pentru emailul care conține token-ul de resetare."""
+    styles = _get_base_styles()
+    
+    html_body = f"""
+    <!DOCTYPE html>
+    <html lang="ro">
+    <head>
+        <meta charset="UTF-8">{styles}
+    </head>
+    <body>
+        <div class="container">
+            <div class="header"><h1>Cerere Resetare Parolă</h1></div>
+            <div class="content">
+                <p>Bună ziua, {username},</p>
+                <p>Am primit o cerere de resetare a parolei pentru contul dumneavoastră în aplicația <strong>{APP_NAME}</strong>.</p>
+                <p>Pentru a seta o parolă nouă, introduceți următorul cod de verificare în fereastra aplicației:</p>
+                <div style="font-size: 18px; font-family: 'Courier New', monospace; text-align: center; padding: 15px; background-color: #f0f0f0; border: 1px dashed #ccc; margin: 20px 0; letter-spacing: 2px;">
+                    {token}
+                </div>
+                <p>Acest cod este valabil timp de <strong>15 minute</strong>.</p>
+                <p><strong>Important:</strong> Dacă nu ați solicitat această resetare, puteți ignora acest email în siguranță; parola dumneavoastră NU a fost schimbată.</p>
+            </div>
+            <div class="footer">
+                 <p style="text-align: center; margin-top: 20px;">Email generat automat la data de {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}.</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return html_body
 
 def _generate_signature_html(user_data, company_name, logo_cid):
     """Generează blocul de semnătură HTML."""
@@ -141,6 +175,41 @@ def create_report_delivery_html(user_data, report_name, company_name, logo_cid):
                 <p>Acest raport a fost generat automat de aplicația <strong>BTExtras Suite</strong> conform parametrilor selectați.</p>
             </div>
             {signature_html}
+        </div>
+    </body>
+    </html>
+    """
+    return html_body
+
+def create_password_reset_html(username, temporary_password):
+    """Generează corpul HTML pentru emailul de resetare a parolei."""
+    styles = _get_base_styles() # Refolosim stilurile definite
+    
+    html_body = f"""
+    <!DOCTYPE html>
+    <html lang="ro">
+    <head>
+        <meta charset="UTF-8">
+        {styles}
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>Resetare Parolă</h1>
+            </div>
+            <div class="content">
+                <p>Bună ziua, {username},</p>
+                <p>Ați solicitat o resetare a parolei pentru contul dumneavoastră în aplicația <strong>{APP_NAME}</strong>.</p>
+                <p>Noua dumneavoastră parolă temporară este:</p>
+                <div style="font-size: 20px; font-weight: bold; letter-spacing: 2px; text-align: center; padding: 15px; background-color: #f0f0f0; border-radius: 5px; margin: 20px 0;">
+                    {temporary_password}
+                </div>
+                <p>Vă rugăm să folosiți această parolă pentru a vă autentifica. La prima autentificare, sistemul vă va solicita să setați o nouă parolă personală.</p>
+                <p>Dacă nu ați solicitat această resetare, vă rugăm să ignorați acest email sau să contactați administratorul de sistem.</p>
+            </div>
+            <div class="footer">
+                 <p style="text-align: center; margin-top: 20px;">Email generat automat la data de {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}.</p>
+            </div>
         </div>
     </body>
     </html>

@@ -32,6 +32,17 @@ CREATE TABLE IF NOT EXISTS valute (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 """
 
+# Tabela pentru stocarea token-urilor de resetare a parolei
+DB_STRUCTURE_PAROLA_RESET_TOKENS = """
+CREATE TABLE IF NOT EXISTS parola_reset_tokens (
+    id_utilizator INT NOT NULL,
+    token_hash VARCHAR(256) NOT NULL,
+    data_expirare DATETIME NOT NULL,
+    PRIMARY KEY (id_utilizator),
+    FOREIGN KEY (id_utilizator) REFERENCES utilizatori(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+"""
+
 DB_STRUCTURE_SWIFT_CODES = """
 CREATE TABLE IF NOT EXISTS swift_code_descriptions (
     cod_swift VARCHAR(4) PRIMARY KEY,
@@ -86,10 +97,19 @@ CREATE TABLE IF NOT EXISTS istoric_importuri (
 ) ENGINE=InnoDB;
 """
 
+# Definiție pentru tabela de setări de sistem (SMTP central, etc.)
+DB_STRUCTURE_SETARI_SISTEM = """
+CREATE TABLE IF NOT EXISTS setari_sistem (
+    cheie_setare VARCHAR(50) PRIMARY KEY,
+    valoare_setare TEXT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+"""
+
 DB_STRUCTURE_UTILIZATORI = """
 CREATE TABLE IF NOT EXISTS utilizatori (
     id INT AUTO_INCREMENT PRIMARY KEY,
     username VARCHAR(50) NOT NULL UNIQUE,
+    email VARCHAR(255) NOT NULL UNIQUE, -- NOU: Câmp pentru adresa de email
     parola_hash VARCHAR(256) NOT NULL,
     salt VARCHAR(64) NOT NULL,
     nume_complet VARCHAR(100),
@@ -438,12 +458,28 @@ class DatabaseHandler:
                 DB_STRUCTURE_ROLURI_PERMISIUNI, DB_STRUCTURE_UTILIZATORI_CONTURI,
                 DB_STRUCTURE_JURNAL_ACTIUNI, DB_STRUCTURE_SWIFT_CODES,
                 DB_STRUCTURE_VALUTE, DB_STRUCTURE_CHAT_CONVERSATII,
-                DB_STRUCTURE_CHAT_PARTICIPANTI, DB_STRUCTURE_CHAT_MESAJE
+                DB_STRUCTURE_CHAT_PARTICIPANTI, DB_STRUCTURE_CHAT_MESAJE,
+                DB_STRUCTURE_SETARI_SISTEM,  # Adăugăm noua tabelă la procesul de creare
+                DB_STRUCTURE_PAROLA_RESET_TOKENS
             ]
+            
             for table_script in all_tables_scripts:
                 cursor.execute(table_script)
             
-            # --- CORECȚIE AICI: Folosim self.fetch_scalar pentru a evita KeyError ---
+            # --- BLOC NOU: Verificare și migrare pentru câmpul 'email' ---
+            query_check_email_col = f"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'utilizatori' AND COLUMN_NAME = 'email'"
+            if self.fetch_scalar(query_check_email_col) == 0:
+                logging.warning("Coloana 'email' lipsește din tabela 'utilizatori'. Se adaugă...")
+                # Adăugăm coloana ca fiind NULLABLE pentru a evita erori pe bazele de date existente
+                cursor.execute("ALTER TABLE utilizatori ADD COLUMN email VARCHAR(255) NULL AFTER username")
+                # Populăm un placeholder unic pentru a putea adăuga constrângerea UNIQUE
+                cursor.execute("UPDATE utilizatori SET email = CONCAT('schimba.email.', id, '@placeholder.loc') WHERE email IS NULL")
+                # Acum alterăm coloana pentru a fi NOT NULL și UNIQUE, conform definiției finale
+                cursor.execute("ALTER TABLE utilizatori MODIFY COLUMN email VARCHAR(255) NOT NULL, ADD UNIQUE (email)")
+                logging.info("Coloana 'email' a fost adăugată și populată cu succes.")
+            # --- SFÂRȘIT BLOC NOU ---
+            
+            # Restul verificărilor de migrare rămân neschimbate
             query_check_col1 = f"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'utilizatori' AND COLUMN_NAME = 'parola_schimbata_necesar'"
             if self.fetch_scalar(query_check_col1) == 0:
                 logging.warning("Coloana 'parola_schimbata_necesar' lipsește. Se adaugă...")
@@ -983,3 +1019,36 @@ class DatabaseHandler:
              return True, "Utilizatorul a fost șters cu succes."
         else:
              return False, "Eroare DB la ștergere."
+        
+    def get_system_settings(self):
+        """Prelucrează toate setările din tabela setari_sistem și le returnează ca dicționar."""
+        if not self.is_connected():
+            return {}
+        settings_list = self.fetch_all_dict("SELECT cheie_setare, valoare_setare FROM setari_sistem")
+        # Transformă lista de dicționare într-un singur dicționar cheie:valoare
+        settings_dict = {item['cheie_setare']: item['valoare_setare'] for item in settings_list}
+        # Convertește valorile numerice și booleene la tipul corect
+        if 'smtp_port' in settings_dict:
+            try:
+                settings_dict['smtp_port'] = int(settings_dict['smtp_port'])
+            except (ValueError, TypeError):
+                settings_dict['smtp_port'] = 0
+        if 'smtp_use_tls' in settings_dict:
+            settings_dict['smtp_use_tls'] = settings_dict['smtp_use_tls'].lower() in ['true', '1', 't', 'y', 'yes']
+            
+        return settings_dict
+
+    def get_user_by_username_or_email(self, identifier):
+        """Caută un utilizator după username sau email și returnează datele sale."""
+        sql = "SELECT id, username, email FROM utilizatori WHERE username = %s OR email = %s"
+        return self.fetch_one_dict(sql, (identifier, identifier))
+
+    def update_user_password(self, user_id, new_password, force_change=True):
+        """Actualizează parola unui utilizator și setează flag-ul pentru schimbare forțată."""
+        salt, pass_hash = auth_handler.hash_parola(new_password)
+        sql = """
+            UPDATE utilizatori 
+            SET parola_hash = %s, salt = %s, parola_schimbata_necesar = %s
+            WHERE id = %s
+        """
+        return self.execute_commit(sql, (pass_hash, salt, force_change, user_id))

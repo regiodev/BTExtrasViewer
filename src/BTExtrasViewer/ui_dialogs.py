@@ -1,14 +1,18 @@
 # ui_dialogs.py
+
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, colorchooser
 from .email_handler import test_smtp_connection
+from common.app_constants import APP_NAME
 from datetime import date
+from datetime import datetime
 from tkcalendar import DateEntry
 # Modulele de bază sunt importate din 'common'
 from common.config_management import save_app_config
 from common import auth_handler # Acesta poate rămâne așa sau poate fi schimbat, dar îl lăsăm momentan pentru simplitate
 import pymysql
 import logging
+import hashlib
 import re
 
 class RoleManagerDialog(simpledialog.Dialog):
@@ -580,11 +584,13 @@ class BalanceReportConfigDialog(simpledialog.Dialog):
         self.result = {"account_id": selected_account['id_cont'], "account_name": selected_account['nume_cont'], "start_date": self.start_date_entry.get_date(), "end_date": self.end_date_entry.get_date(), "granularity": self.granularity_var.get(), "currency": selected_account.get('valuta', 'RON')}
 
 class LoginDialog(simpledialog.Dialog):
+    
     def __init__(self, parent, db_handler):
         self.db_handler = db_handler
         super().__init__(parent, "Autentificare BTExtrasViewer")
 
     def body(self, master):
+        # ... (codul pentru câmpurile username și password rămâne neschimbat) ...
         master.grid_columnconfigure(0, weight=1)
         master.grid_columnconfigure(1, weight=1)
         tk.Label(master, text="Nume utilizator:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=5)
@@ -593,14 +599,94 @@ class LoginDialog(simpledialog.Dialog):
         tk.Label(master, text="Parola:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=5)
         self.password_entry = tk.Entry(master, show="*", width=30)
         self.password_entry.grid(row=1, column=1, padx=5, pady=5)
+
+        # --- BLOC NOU: Adăugare link pentru parolă uitată ---
+        forgot_password_label = tk.Label(master, text="Am uitat parola...", fg="blue", cursor="hand2")
+        forgot_password_label.grid(row=2, column=1, sticky=tk.E, padx=5, pady=(0, 5))
+        forgot_password_label.bind("<Button-1>", self._handle_forgot_password)
+        # --- SFÂRȘIT BLOC NOU ---
+        
         self.parent = master.winfo_toplevel()
-        # Asigurăm centrarea corectă a ferestrei
         self.parent.update_idletasks()
         x = self.parent.winfo_rootx() + (self.parent.winfo_width() // 2) - (self.winfo_width() // 2)
         y = self.parent.winfo_rooty() + (self.parent.winfo_height() // 2) - (self.winfo_height() // 2)
-        if x > 0 and y > 0: # Prevenim poziționarea în afara ecranului
+        if x > 0 and y > 0: 
             self.geometry(f"+{x}+{y}")
         return self.username_entry
+
+    # --- Gestionează procesul de resetare ---
+    def _handle_forgot_password(self, event=None):
+        # Importuri locale necesare
+        import secrets
+        from datetime import datetime, timedelta
+        
+        identifier = simpledialog.askstring("Resetare Parolă", "Introduceți numele de utilizator sau adresa de email:", parent=self)
+        if not identifier:
+            return
+
+        # 1. Verificare configurare SMTP
+        system_smtp_config = self.db_handler.get_system_settings()
+        if not all(system_smtp_config.get(k) for k in ['smtp_host', 'smtp_port', 'smtp_user', 'smtp_parola']):
+            messagebox.showerror("Eroare Configurare", "Funcționalitatea de resetare a parolei nu este activă.\nContactați administratorul de sistem.", parent=self)
+            return
+
+        # 2. Găsire utilizator
+        user_data = self.db_handler.get_user_by_username_or_email(identifier)
+        if not user_data:
+            messagebox.showwarning("Utilizator Inexistent", "Niciun cont nu a fost găsit pentru datele introduse.", parent=self)
+            return
+
+        try:
+            # 3. Generare Token și Expirare
+            raw_token = secrets.token_urlsafe(16)
+            expiration_date = datetime.now() + timedelta(minutes=15)
+
+            # --- MODIFICAREA CHEIE AICI ---
+            # Folosim un hash standard (SHA256), fără "salt" aleatoriu.
+            token_hash = hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
+            # --- SFÂRȘIT MODIFICARE ---
+
+            # 4. Stocare Token Hash în DB
+            sql_store_token = """
+                INSERT INTO parola_reset_tokens (id_utilizator, token_hash, data_expirare)
+                VALUES (%s, %s, %s)
+                ON DUPLICATE KEY UPDATE token_hash = VALUES(token_hash), data_expirare = VALUES(data_expirare)
+            """
+            self.db_handler.execute_commit(sql_store_token, (user_data['id'], token_hash, expiration_date))
+
+            # 5. Trimitere Email cu Token-ul Brut
+            from .email_composer import create_password_token_html
+            from .email_handler import send_password_reset_email
+
+            subject = f"Cerere Resetare Parolă - {APP_NAME}"
+            html_body = create_password_token_html(user_data['username'], raw_token)
+            
+            smtp_config_for_sending = {
+                'server': system_smtp_config['smtp_host'],
+                'port': system_smtp_config['smtp_port'],
+                'user': system_smtp_config['smtp_user'],
+                'password': system_smtp_config['smtp_parola'],
+                'sender_email': system_smtp_config['smtp_adresa_expeditor'],
+                'security': 'STARTTLS' if system_smtp_config.get('smtp_use_tls', True) else 'Niciuna'
+            }
+
+            email_sent, message = send_password_reset_email(smtp_config_for_sending, user_data['email'], subject, html_body)
+
+            if email_sent:
+                messagebox.showinfo("Verificați Emailul", f"Un cod de verificare a fost trimis la adresa {user_data['email']}.\nIntroduceți codul în fereastra următoare.", parent=self)
+                
+                # 6. Deschidem dialogul pentru finalizarea resetării
+                dialog_class_to_use = ResetPasswordWithTokenDialog if 'ResetPasswordWithTokenDialog' in globals() else globals().get('ResetPasswordWithTokenDialog')
+                reset_dialog = dialog_class_to_use(self, self.db_handler, user_data['id'])
+                
+                if reset_dialog.result:
+                    messagebox.showinfo("Succes", "Parola a fost schimbată cu succes!", parent=self)
+            else:
+                messagebox.showerror("Eroare Trimitere Email", f"Nu s-a putut trimite emailul de resetare.\nContactați administratorul.\n\nDetalii: {message}", parent=self)
+
+        except Exception as e:
+            messagebox.showerror("Eroare Proces", f"A apărut o eroare în timpul procesului de resetare:\n{e}", parent=self)
+
 
     def validate(self):
         try:
@@ -688,27 +774,32 @@ class UserEditDialog(simpledialog.Dialog):
         tk.Label(details_frame, text="Nume complet:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
         self.fullname_entry = tk.Entry(details_frame, width=40)
         self.fullname_entry.grid(row=1, column=1, padx=5, pady=2)
+        
+        # --- Câmp nou pentru Email ---
+        tk.Label(details_frame, text="Adresă Email*:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
+        self.email_entry = tk.Entry(details_frame, width=40)
+        self.email_entry.grid(row=2, column=1, padx=5, pady=2)
+        # --- Sfârșit câmp nou ---
 
         password_label_text = "Parola*:" if not self.user_id else "Parolă nouă:"
-        tk.Label(details_frame, text=password_label_text).grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
+        tk.Label(details_frame, text=password_label_text).grid(row=3, column=0, sticky=tk.W, padx=5, pady=2)
         self.password_entry = tk.Entry(details_frame, show="*", width=40)
-        self.password_entry.grid(row=2, column=1, padx=5, pady=2)
+        self.password_entry.grid(row=3, column=1, padx=5, pady=2)
         if self.user_id:
-            tk.Label(details_frame, text="(lasă gol pentru a nu schimba)", font=("TkDefaultFont", 8, "italic")).grid(row=2, column=2, sticky=tk.W)
+            tk.Label(details_frame, text="(lasă gol pentru a nu schimba)", font=("TkDefaultFont", 8, "italic")).grid(row=3, column=2, sticky=tk.W)
         
-        # --- SECȚIUNE NOUĂ PENTRU ACCES TRANZACȚII ---
-        tk.Label(details_frame, text="Acces Tranzacții:").grid(row=3, column=0, sticky=tk.W, padx=5, pady=2)
+        # --- Secțiune pentru Acces Tranzacții ---
+        tk.Label(details_frame, text="Acces Tranzacții:").grid(row=4, column=0, sticky=tk.W, padx=5, pady=2)
         self.tx_access_var = tk.StringVar(value='toate')
         self.tx_access_combo = ttk.Combobox(details_frame, textvariable=self.tx_access_var, values=['toate', 'credit', 'debit'], state='readonly', width=38)
-        self.tx_access_combo.grid(row=3, column=1, pady=2, padx=5)
-
+        self.tx_access_combo.grid(row=4, column=1, pady=2, padx=5)
 
         permissions_frame = ttk.Frame(main_frame)
         permissions_frame.grid(row=1, column=0, padx=5, pady=5, sticky="nsew")
         permissions_frame.grid_columnconfigure(0, weight=1)
         permissions_frame.grid_columnconfigure(1, weight=1)
 
-        # --- Panou pentru ROLURI (înlocuiește permisiunile individuale) ---
+        # Panou pentru ROLURI
         roles_frame = ttk.LabelFrame(permissions_frame, text="Roluri Asignate")
         roles_frame.grid(row=0, column=0, padx=(0, 5), pady=5, sticky="nsew")
         
@@ -722,7 +813,7 @@ class UserEditDialog(simpledialog.Dialog):
         for role in self.all_roles:
             self.roles_listbox.insert(tk.END, role['nume_rol'])
 
-        # --- Panou pentru CONTURI BANCARE ---
+        # Panou pentru CONTURI BANCARE
         accounts_frame = ttk.LabelFrame(permissions_frame, text="Conturi Bancare Permise")
         accounts_frame.grid(row=0, column=1, padx=(5, 0), pady=5, sticky="nsew")
 
@@ -741,6 +832,7 @@ class UserEditDialog(simpledialog.Dialog):
             self.username_entry.insert(0, self.user_data.get('username') or '')
             self.username_entry.config(state=tk.DISABLED)
             self.fullname_entry.insert(0, self.user_data.get('nume_complet') or '')
+            self.email_entry.insert(0, self.user_data.get('email') or '') # NOU: Pre-populare email
             self.tx_access_var.set(self.user_data.get('tranzactie_acces', 'toate'))
             
             for i, role in enumerate(self.all_roles):
@@ -791,6 +883,14 @@ class UserEditDialog(simpledialog.Dialog):
         username = self.username_entry.get().strip()
         fullname = self.fullname_entry.get().strip() or None
         password = self.password_entry.get()
+        email = self.email_entry.get().strip() # NOU: Colectare email
+
+        # NOU: Validare email
+        if not email or "@" not in email or "." not in email.split('@')[1]:
+            messagebox.showerror("Eroare", "Adresa de email este invalidă sau lipsește.", parent=self)
+            self.result = None
+            return # Previne închiderea dialogului
+
         tx_access = self.tx_access_var.get()
         
         selected_role_indices = self.roles_listbox.curselection()
@@ -801,20 +901,18 @@ class UserEditDialog(simpledialog.Dialog):
 
         cursor = None
         try:
-            # --- MODIFICARE: Am eliminat blocurile de management manual al tranzacției ---
-            # if self.db_handler.conn.in_transaction: ...
-            # self.db_handler.conn.start_transaction()
-            
             cursor = self.db_handler.conn.cursor()
             
             if self.user_id: 
                 # --- Logică de MODIFICARE ---
                 if password:
                     salt, pass_hash = auth_handler.hash_parola(password)
-                    cursor.execute("UPDATE utilizatori SET nume_complet = %s, parola_hash = %s, salt = %s, tranzactie_acces = %s WHERE id = %s",
-                                   (fullname, pass_hash, salt, tx_access, self.user_id))
+                    # MODIFICAT: Se adaugă email la UPDATE
+                    cursor.execute("UPDATE utilizatori SET nume_complet = %s, email = %s, parola_hash = %s, salt = %s, tranzactie_acces = %s WHERE id = %s",
+                                   (fullname, email, pass_hash, salt, tx_access, self.user_id))
                 else:
-                    cursor.execute("UPDATE utilizatori SET nume_complet = %s, tranzactie_acces = %s WHERE id = %s", (fullname, tx_access, self.user_id))
+                    # MODIFICAT: Se adaugă email la UPDATE
+                    cursor.execute("UPDATE utilizatori SET nume_complet = %s, email = %s, tranzactie_acces = %s WHERE id = %s", (fullname, email, tx_access, self.user_id))
 
                 cursor.execute("DELETE FROM utilizatori_roluri WHERE id_utilizator = %s", (self.user_id,))
                 if selected_role_ids:
@@ -829,8 +927,9 @@ class UserEditDialog(simpledialog.Dialog):
             else: 
                 # --- Logică de ADĂUGARE ---
                 salt, pass_hash = auth_handler.hash_parola(password)
-                cursor.execute("INSERT INTO utilizatori (username, nume_complet, parola_hash, salt, tranzactie_acces) VALUES (%s, %s, %s, %s, %s)",
-                               (username, fullname, pass_hash, salt, tx_access))
+                # MODIFICAT: Se adaugă email la INSERT
+                cursor.execute("INSERT INTO utilizatori (username, nume_complet, email, parola_hash, salt, tranzactie_acces) VALUES (%s, %s, %s, %s, %s, %s)",
+                               (username, fullname, email, pass_hash, salt, tx_access))
                 new_user_id = cursor.lastrowid
                 
                 if selected_role_ids:
@@ -849,7 +948,9 @@ class UserEditDialog(simpledialog.Dialog):
         except pymysql.Error as e:
             # Anularea tranzacției în caz de eroare
             self.db_handler.conn.rollback()
-            messagebox.showerror("Eroare Bază de Date", f"Nu s-a putut salva utilizatorul:\n{e.msg}", parent=self)
+            # MODIFICARE: Folosim e.args[1] pentru un mesaj de eroare mai clar de la PyMySQL
+            error_message = e.args[1] if len(e.args) > 1 else str(e)
+            messagebox.showerror("Eroare Bază de Date", f"Nu s-a putut salva utilizatorul:\n{error_message}", parent=self)
             self.result = False
         finally:
             # Închiderea cursorului la final
@@ -864,15 +965,20 @@ class UserManagerDialog(simpledialog.Dialog):
         self.selected_user_id = None
         self.selected_user_is_active = None
         super().__init__(parent, "Gestionare Utilizatori")
+
     def body(self, master):
         self.tree_frame = ttk.Frame(master)
         self.tree_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
-        cols = ("username", "nume_complet", "roluri", "stare")
+        cols = ("username", "email", "nume_complet", "roluri", "stare") # NOU: Adăugat 'email'
         self.users_tree = ttk.Treeview(self.tree_frame, columns=cols, show="headings", selectmode="browse")
-        col_widths = {"username": 150, "nume_complet": 200, "roluri": 250, "stare": 80}
+        
+        # NOU: Actualizat lățimi și headere
+        col_widths = {"username": 150, "email": 200, "nume_complet": 200, "roluri": 250, "stare": 80}
         for col in cols:
-            self.users_tree.heading(col, text=col.replace("_", " ").capitalize())
+            header_text = col.replace("_", " ").replace("nume complet", "Nume Complet").capitalize()
+            self.users_tree.heading(col, text=header_text)
             self.users_tree.column(col, width=col_widths.get(col, 150), anchor=tk.W)
+
         self.users_tree.tag_configure('inactive', foreground='gray')
         self.users_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar = ttk.Scrollbar(self.tree_frame, orient=tk.VERTICAL, command=self.users_tree.yview)
@@ -880,30 +986,78 @@ class UserManagerDialog(simpledialog.Dialog):
         self.users_tree.configure(yscrollcommand=scrollbar.set)
         self.users_tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.users_tree.bind("<Double-1>", lambda e: self._on_edit_user())
+
         button_container = ttk.Frame(master)
         button_container.pack(side=tk.BOTTOM, fill=tk.X, pady=(0,10), padx=10)
+        
         self.add_button = ttk.Button(button_container, text="Adaugă Utilizator", command=self._on_add_user)
         self.add_button.pack(side=tk.LEFT, padx=5)
+        
         self.edit_button = ttk.Button(button_container, text="Modifică Selectat", command=self._on_edit_user, state=tk.DISABLED)
         self.edit_button.pack(side=tk.LEFT, padx=5)
+        
         self.toggle_status_button = ttk.Button(button_container, text="Activează/Dezactivează", command=self._on_toggle_status, state=tk.DISABLED)
         self.toggle_status_button.pack(side=tk.LEFT, padx=5)
+        
         self.delete_button = ttk.Button(button_container, text="Șterge Utilizator", command=self._on_delete_user, state=tk.DISABLED)
         self.delete_button.pack(side=tk.LEFT, padx=5)
+        
+        # --- BUTON NOU PENTRU SETĂRI SMTP DE SISTEM ---
+        self.system_smtp_button = ttk.Button(button_container, text="Setări Email Sistem", command=self._on_open_system_smtp_settings)
+        self.system_smtp_button.pack(side=tk.LEFT, padx=(15, 5))
+        # --- SFÂRȘIT BUTON NOU ---
+
         ttk.Button(button_container, text="Închide", command=self.ok).pack(side=tk.RIGHT, padx=5)
+        
         self.load_users()
         return self.users_tree
+
     def buttonbox(self): pass
+
     def load_users(self):
         for item in self.users_tree.get_children(): self.users_tree.delete(item)
-        users_data = self.db_handler.get_all_users_with_roles()
+        # NOU: Interogarea va trebui actualizată pentru a prelua și emailul
+        # Vom presupune că `get_all_users_with_roles` va fi actualizată sau deja preia toate câmpurile necesare.
+        # Pentru moment, adaptăm popularea.
+        users_data = self.db_handler.fetch_all_dict(
+            """
+            SELECT u.id, u.username, u.email, u.nume_complet, u.activ, 
+                   GROUP_CONCAT(r.nume_rol SEPARATOR ', ') as roluri
+            FROM utilizatori u
+            LEFT JOIN utilizatori_roluri ur ON u.id = ur.id_utilizator
+            LEFT JOIN roluri r ON ur.id_rol = r.id
+            GROUP BY u.id, u.username, u.email, u.nume_complet, u.activ
+            ORDER BY u.username ASC;
+            """
+        )
         if users_data:
             for user in users_data:
                 stare = "Activ" if user['activ'] else "Inactiv"
                 tags = () if user['activ'] else ('inactive',)
-                values = (user['username'], user.get('nume_complet', ''), user.get('roluri', 'N/A'), stare)
+                values = (
+                    user['username'], 
+                    user.get('email', 'N/A'), # Afișăm emailul
+                    user.get('nume_complet', ''), 
+                    user.get('roluri', 'N/A'), 
+                    stare
+                )
                 self.users_tree.insert("", tk.END, iid=user['id'], values=values, tags=tags)
         self._on_tree_select(None)
+
+    # --- METODĂ NOUĂ PENTRU A DESCHIDE DIALOGUL SMTP ---
+    def _on_open_system_smtp_settings(self):
+        """Deschide dialogul de configurare a setărilor SMTP de sistem."""
+        try:
+            # Preluăm setările curente din baza de date
+            current_config = self.db_handler.get_system_settings()
+            
+            # Creăm și afișăm dialogul, pasându-i setările curente
+            # Dialogul se va ocupa singur de salvarea datelor la apăsarea butonului "Salvează"
+            dialog = SystemSmtpConfigDialog(self, self.db_handler, initial_config=current_config)
+            
+        except Exception as e:
+            messagebox.showerror("Eroare", f"Nu s-a putut deschide dialogul de setări:\n{e}", parent=self)
+
     def _on_tree_select(self, event=None):
         selected_items = self.users_tree.selection()
         if selected_items:
@@ -924,6 +1078,7 @@ class UserManagerDialog(simpledialog.Dialog):
             self.edit_button.config(state=tk.DISABLED)
             self.toggle_status_button.config(state=tk.DISABLED, text="Activează/Dezactivează")
             self.delete_button.config(state=tk.DISABLED)
+
     def _on_delete_user(self):
         if not self.selected_user_id: return
         try:
@@ -948,17 +1103,20 @@ class UserManagerDialog(simpledialog.Dialog):
                 self.load_users()
             else:
                 messagebox.showerror("Eroare", message, parent=self)
+
     def _on_add_user(self):
         dialog = UserEditDialog(self, self.db_handler, current_user=self.current_user)
         if dialog.result:
             messagebox.showinfo("Succes", "Utilizatorul a fost adăugat.", parent=self)
             self.load_users()
+
     def _on_edit_user(self):
         if not self.selected_user_id: return
         dialog = UserEditDialog(self, self.db_handler, user_id=self.selected_user_id, current_user=self.current_user)
         if dialog.result:
             messagebox.showinfo("Succes", "Utilizatorul a fost modificat.", parent=self)
             self.load_users()
+            
     def _on_toggle_status(self):
         if not self.selected_user_id: return
         item_values = self.users_tree.item(self.selected_user_id)['values']
@@ -1179,6 +1337,222 @@ class ForcePasswordChangeDialog(simpledialog.Dialog):
         """
         if self.db_handler.execute_commit(sql, (pass_hash, salt, self.user_id)):
             messagebox.showinfo("Succes", "Parola a fost schimbată. Vă rugăm să vă autentificați din nou cu noua parolă.", parent=self.master)
+            self.result = True
+        else:
+            messagebox.showerror("Eroare DB", "Nu s-a putut actualiza parola în baza de date.", parent=self)
+            self.result = False
+
+class SystemSmtpConfigDialog(simpledialog.Dialog):
+    """Dialog pentru configurarea setărilor SMTP la nivel de sistem."""
+    def __init__(self, parent, db_handler, initial_config=None):
+        self.db_handler = db_handler
+        self.initial_config = initial_config or {}
+        super().__init__(parent, "Configurare Email Sistem (Resetare Parole)")
+
+    def body(self, master):
+        tk.Label(master, text="Host SMTP:").grid(row=0, sticky=tk.W, pady=2)
+        self.host_entry = tk.Entry(master, width=40)
+        self.host_entry.grid(row=0, column=1, pady=2)
+        self.host_entry.insert(0, self.initial_config.get('smtp_host', ''))
+
+        tk.Label(master, text="Port:").grid(row=1, sticky=tk.W, pady=2)
+        self.port_entry = tk.Entry(master, width=40)
+        self.port_entry.grid(row=1, column=1, pady=2)
+        self.port_entry.insert(0, self.initial_config.get('smtp_port', '587'))
+
+        tk.Label(master, text="Utilizator (Email):").grid(row=2, sticky=tk.W, pady=2)
+        self.user_entry = tk.Entry(master, width=40)
+        self.user_entry.grid(row=2, column=1, pady=2)
+        self.user_entry.insert(0, self.initial_config.get('smtp_user', ''))
+
+        tk.Label(master, text="Parolă:").grid(row=3, sticky=tk.W, pady=2)
+        self.password_entry = tk.Entry(master, show="*", width=40)
+        self.password_entry.grid(row=3, column=1, pady=2)
+        self.password_entry.insert(0, self.initial_config.get('smtp_parola', ''))
+
+        tk.Label(master, text="Adresă Expeditor:").grid(row=4, sticky=tk.W, pady=2)
+        self.sender_entry = tk.Entry(master, width=40)
+        self.sender_entry.grid(row=4, column=1, pady=2)
+        self.sender_entry.insert(0, self.initial_config.get('smtp_adresa_expeditor', ''))
+        
+        self.use_tls_var = tk.BooleanVar(value=self.initial_config.get('smtp_use_tls', True))
+        tk.Checkbutton(master, text="Utilizează TLS", variable=self.use_tls_var).grid(row=5, columnspan=2, pady=5)
+
+        return self.host_entry
+
+    def validate(self):
+        host = self.host_entry.get().strip()
+        port = self.port_entry.get().strip()
+        user = self.user_entry.get().strip()
+        
+        if not all([host, port, user]):
+            messagebox.showwarning("Date Incomplete", "Host-ul, portul și utilizatorul sunt obligatorii.", parent=self)
+            return 0
+        
+        try:
+            int(port)
+        except ValueError:
+            messagebox.showwarning("Format Invalid", "Portul trebuie să fie un număr.", parent=self)
+            return 0
+            
+        return 1
+
+    def apply(self):
+        self.result = {
+            "smtp_host": self.host_entry.get().strip(),
+            "smtp_port": int(self.port_entry.get().strip()),
+            "smtp_user": self.user_entry.get().strip(),
+            "smtp_parola": self.password_entry.get(),
+            "smtp_adresa_expeditor": self.sender_entry.get().strip() or self.user_entry.get().strip(),
+            "smtp_use_tls": self.use_tls_var.get()
+        }
+        
+        # Salvare directă în baza de date
+        try:
+            for cheie, valoare in self.result.items():
+                # Folosim o interogare de tip "INSERT ... ON DUPLICATE KEY UPDATE" pentru simplitate
+                sql = """
+                    INSERT INTO setari_sistem (cheie_setare, valoare_setare) 
+                    VALUES (%s, %s) 
+                    ON DUPLICATE KEY UPDATE valoare_setare = %s
+                """
+                self.db_handler.execute_commit(sql, (cheie, str(valoare), str(valoare)))
+            
+            messagebox.showinfo("Succes", "Setările SMTP ale sistemului au fost salvate.", parent=self.parent)
+
+        except Exception as e:
+            messagebox.showerror("Eroare Salvare", f"Nu s-au putut salva setările în baza de date:\n{e}", parent=self)
+            self.result = None # Anulăm rezultatul în caz de eroare
+
+class ChangePasswordDialog(simpledialog.Dialog):
+    """Dialog pentru schimbarea voluntară a parolei de către utilizatorul autentificat."""
+    def __init__(self, parent, db_handler, current_user):
+        self.db_handler = db_handler
+        self.current_user = current_user
+        super().__init__(parent, "Schimbare Parolă Personală")
+
+    def body(self, master):
+        tk.Label(master, text="Parola curentă:").grid(row=0, sticky=tk.W, pady=5, padx=5)
+        self.current_pass_entry = tk.Entry(master, show="*", width=35)
+        self.current_pass_entry.grid(row=0, column=1, pady=5, padx=5)
+
+        tk.Label(master, text="Parola nouă:").grid(row=1, sticky=tk.W, pady=5, padx=5)
+        self.new_pass_entry = tk.Entry(master, show="*", width=35)
+        self.new_pass_entry.grid(row=1, column=1, pady=5, padx=5)
+
+        tk.Label(master, text="Confirmă parola nouă:").grid(row=2, sticky=tk.W, pady=5, padx=5)
+        self.confirm_pass_entry = tk.Entry(master, show="*", width=35)
+        self.confirm_pass_entry.grid(row=2, column=1, pady=5, padx=5)
+        
+        return self.current_pass_entry
+
+    def validate(self):
+        current_pass = self.current_pass_entry.get()
+        new_pass = self.new_pass_entry.get()
+        confirm_pass = self.confirm_pass_entry.get()
+
+        if not all([current_pass, new_pass, confirm_pass]):
+            messagebox.showwarning("Date Incomplete", "Toate câmpurile sunt obligatorii.", parent=self)
+            return 0
+
+        # Verificăm parola curentă
+        user_db_data = self.db_handler.get_user_by_username(self.current_user['username'])
+        is_valid = auth_handler.verifica_parola(current_pass, user_db_data['salt'], user_db_data['parola_hash'])
+        
+        if not is_valid:
+            messagebox.showerror("Eroare", "Parola curentă este incorectă.", parent=self)
+            return 0
+            
+        if len(new_pass) < 8:
+            messagebox.showwarning("Parolă Prea Scurtă", "Parola nouă trebuie să aibă cel puțin 8 caractere.", parent=self)
+            return 0
+
+        if new_pass != confirm_pass:
+            messagebox.showerror("Eroare", "Parolele noi nu se potrivesc.", parent=self)
+            return 0
+        
+        return 1
+
+    def apply(self):
+        new_password = self.new_pass_entry.get()
+        # Folosim metoda existentă, dar setăm force_change la False
+        success = self.db_handler.update_user_password(self.current_user['id'], new_password, force_change=False)
+        
+        if success:
+            log_details = f"Utilizatorul '{self.current_user['username']}' și-a schimbat parola."
+            self.db_handler.log_action(self.current_user['id'], self.current_user['username'], "Schimbare parolă voluntară", log_details)
+            messagebox.showinfo("Succes", "Parola a fost schimbată cu succes.", parent=self)
+        else:
+            messagebox.showerror("Eroare DB", "A apărut o problemă la actualizarea parolei în baza de date.", parent=self)
+
+class ResetPasswordWithTokenDialog(simpledialog.Dialog):
+    """Dialog pentru finalizarea procesului de resetare folosind token-ul din email."""
+    def __init__(self, parent, db_handler, user_id):
+        self.db_handler = db_handler
+        self.user_id = user_id
+        super().__init__(parent, "Verificare Cod și Setare Parolă Nouă")
+
+    def body(self, master):
+        tk.Label(master, text="Cod Verificare (din email):").grid(row=0, sticky=tk.W, pady=5, padx=5)
+        self.token_entry = tk.Entry(master, width=45)
+        self.token_entry.grid(row=0, column=1, pady=5, padx=5)
+
+        tk.Label(master, text="Parola nouă:").grid(row=1, sticky=tk.W, pady=5, padx=5)
+        self.new_pass_entry = tk.Entry(master, show="*", width=45)
+        self.new_pass_entry.grid(row=1, column=1, pady=5, padx=5)
+
+        tk.Label(master, text="Confirmă parola nouă:").grid(row=2, sticky=tk.W, pady=5, padx=5)
+        self.confirm_pass_entry = tk.Entry(master, show="*", width=45)
+        self.confirm_pass_entry.grid(row=2, column=1, pady=5, padx=5)
+        
+        return self.token_entry
+
+    def validate(self):
+        # Validări preliminare pe câmpuri
+        if not all([self.token_entry.get(), self.new_pass_entry.get(), self.confirm_pass_entry.get()]):
+            messagebox.showwarning("Date Incomplete", "Toate câmpurile sunt obligatorii.", parent=self)
+            return 0
+        if self.new_pass_entry.get() != self.confirm_pass_entry.get():
+            messagebox.showerror("Eroare", "Parolele noi nu se potrivesc.", parent=self)
+            return 0
+        if len(self.new_pass_entry.get()) < 8:
+            messagebox.showwarning("Parolă Prea Scurtă", "Parola nouă trebuie să aibă cel puțin 8 caractere.", parent=self)
+            return 0
+        
+        # Validare Token în DB
+        raw_token = self.token_entry.get()
+        token_data = self.db_handler.fetch_one_dict(
+            "SELECT token_hash, data_expirare FROM parola_reset_tokens WHERE id_utilizator = %s", (self.user_id,)
+        )
+
+        if not token_data:
+            messagebox.showerror("Eroare", "Cod invalid sau expirat. Vă rugăm reîncercați procesul de resetare.", parent=self)
+            return 0
+
+        # Verificăm expirarea
+        if datetime.now() > token_data['data_expirare']:
+            messagebox.showerror("Eroare", "Codul de resetare a expirat. Vă rugăm reîncercați procesul.", parent=self)
+            return 0
+
+        # Generăm hash-ul pentru token-ul introdus folosind aceeași metodă ca la creare
+        hash_to_check = hashlib.sha256(raw_token.encode('utf-8')).hexdigest()
+
+        # Comparăm hash-ul generat cu cel stocat în baza de date
+        if hash_to_check != token_data['token_hash']:
+            messagebox.showerror("Eroare", "Cod de verificare invalid. Asigurați-vă că ați copiat corect codul.", parent=self)
+            return 0
+
+        return 1
+
+    def apply(self):
+        new_password = self.new_pass_entry.get()
+        
+        # Token valid. Actualizăm parola și ștergem token-ul.
+        update_success = self.db_handler.update_user_password(self.user_id, new_password, force_change=False)
+        
+        if update_success:
+            # Ștergem token-ul folosit
+            self.db_handler.execute_commit("DELETE FROM parola_reset_tokens WHERE id_utilizator = %s", (self.user_id,))
             self.result = True
         else:
             messagebox.showerror("Eroare DB", "Nu s-a putut actualiza parola în baza de date.", parent=self)

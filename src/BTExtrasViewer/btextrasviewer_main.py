@@ -53,7 +53,7 @@ from BTExtrasViewer.ui_dialogs import (
     AccountManagerDialog, AccountEditDialog, TransactionTypeManagerDialog, 
     SMTPConfigDialog, BalanceReportConfigDialog, LoginDialog, 
     UserManagerDialog, RoleManagerDialog, SwiftCodeManagerDialog, CurrencyManagerDialog,
-    ForcePasswordChangeDialog
+    ForcePasswordChangeDialog, ChangePasswordDialog
 )
 # --- SFÂRȘIT BLOC DE IMPORTURI REVIZUIT ---
 
@@ -928,6 +928,10 @@ class BTViewerApp:
         # --- Meniul Fișier (simplificat) ---
         file_menu = tk.Menu(menubar, tearoff=0, font=(default_font_family, default_font_size))
         menubar.add_cascade(label="Fișier", menu=file_menu)
+
+        file_menu.add_command(label="Schimbă Parola...", command=self._show_change_password_dialog)
+        file_menu.add_separator()
+
         file_menu.add_command(label="Ieșire", command=lambda: ui_utils.handle_app_exit(self, self.master))
         
         # --- Meniul Administrare (actualizat cu noile permisiuni) ---
@@ -987,6 +991,12 @@ class BTViewerApp:
         help_menu.add_separator()
         # << MODIFICARE: Folosim 'initial_topic_id' și ID-ul corect 'about' >>
         help_menu.add_command(label="Despre BTExtras Suite...", command=lambda: self._show_help_dialog(initial_topic_id="about"))
+
+    def _show_change_password_dialog(self):
+        """Deschide dialogul pentru schimbarea voluntară a parolei."""
+        # Creăm o instanță a noului dialog (pe care îl vom crea mai jos)
+        dialog = ChangePasswordDialog(self.master, self.db_handler, self.current_user)
+        # Nu este nevoie să facem nimic cu rezultatul, dialogul gestionează totul intern.
 
     def _on_account_selected(self, event=None):
         if self._prevent_on_account_selected_trigger: return

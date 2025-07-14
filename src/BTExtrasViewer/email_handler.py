@@ -202,3 +202,38 @@ def test_smtp_connection(smtp_config):
         return True, "Conexiune și autentificare reușite!"
     except Exception as e:
         return False, f"Testul a eșuat:\n{type(e).__name__}: {e}"
+    
+def send_password_reset_email(smtp_config, recipient_email, subject, html_body):
+    """Trimite un email simplu, formatat HTML, fără atașamente."""
+    if not all(smtp_config.get(k) for k in ['server', 'port', 'user', 'password', 'sender_email']):
+        return False, "Setările SMTP sunt incomplete."
+
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['From'] = smtp_config['sender_email']
+        msg['To'] = recipient_email
+        msg['Subject'] = subject
+
+        # Atașăm corpul HTML
+        msg.attach(MIMEText(html_body, 'html'))
+
+        server = None
+        security = smtp_config.get('security', 'SSL/TLS')
+
+        if security == 'SSL/TLS':
+            context = ssl.create_default_context()
+            server = smtplib.SMTP_SSL(smtp_config['server'], smtp_config['port'], context=context)
+        else: # Include STARTTLS și 'Niciuna'
+            server = smtplib.SMTP(smtp_config['server'], smtp_config['port'])
+            if security == 'STARTTLS':
+                server.starttls(context=ssl.create_default_context())
+        
+        server.login(smtp_config['user'], smtp_config['password'])
+        server.send_message(msg)
+        server.quit()
+        
+        return True, "Emailul a fost trimis cu succes!"
+
+    except Exception as e:
+        logging.error(f"Eroare la trimiterea emailului de resetare: {e}", exc_info=True)
+        return False, str(e)
