@@ -659,7 +659,7 @@ class LoginDialog(simpledialog.Dialog):
             from .email_handler import send_password_reset_email
 
             subject = f"Cerere Resetare Parolă - {APP_NAME}"
-            html_body = create_password_token_html(user_data['username'], raw_token)
+            html_body = create_password_token_html(user_data.get('nume_complet'), user_data['username'], raw_token)
             
             smtp_config_for_sending = {
                 'server': system_smtp_config['smtp_host'],

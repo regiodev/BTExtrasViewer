@@ -1040,7 +1040,7 @@ class DatabaseHandler:
 
     def get_user_by_username_or_email(self, identifier):
         """Caută un utilizator după username sau email și returnează datele sale."""
-        sql = "SELECT id, username, email FROM utilizatori WHERE username = %s OR email = %s"
+        sql = "SELECT id, username, email, nume_complet FROM utilizatori WHERE username = %s OR email = %s"
         return self.fetch_one_dict(sql, (identifier, identifier))
 
     def update_user_password(self, user_id, new_password, force_change=True):

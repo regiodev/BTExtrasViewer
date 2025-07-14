@@ -31,8 +31,10 @@ def _get_base_styles():
         </style>
     """
 
-def create_password_token_html(username, token):
+def create_password_token_html(nume_complet, username, token):
     """Generează corpul HTML pentru emailul care conține token-ul de resetare."""
+    # MODIFICAT: Folosește numele complet, sau username-ul ca alternativă
+    nume_salut = nume_complet if nume_complet and nume_complet.strip() else username
     styles = _get_base_styles()
     
     html_body = f"""
@@ -45,7 +47,7 @@ def create_password_token_html(username, token):
         <div class="container">
             <div class="header"><h1>Cerere Resetare Parolă</h1></div>
             <div class="content">
-                <p>Bună ziua, {username},</p>
+                <p>Bună ziua, {nume_salut},</p>
                 <p>Am primit o cerere de resetare a parolei pentru contul dumneavoastră în aplicația <strong>{APP_NAME}</strong>.</p>
                 <p>Pentru a seta o parolă nouă, introduceți următorul cod de verificare în fereastra aplicației:</p>
                 <div style="font-size: 18px; font-family: 'Courier New', monospace; text-align: center; padding: 15px; background-color: #f0f0f0; border: 1px dashed #ccc; margin: 20px 0; letter-spacing: 2px;">

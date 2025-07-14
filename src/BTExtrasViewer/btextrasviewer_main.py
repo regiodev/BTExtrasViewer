@@ -193,7 +193,9 @@ class BTViewerApp:
 
     def _show_help_dialog(self, initial_topic_id='welcome'):
         """Deschide fereastra de ajutor, opțional la un subiect specific."""
-        HelpDialog(self.master, initial_topic_id=initial_topic_id)
+        # 'self.master' este fereastra principală a aplicației
+        help_win = HelpDialog(self.master, initial_topic_id=initial_topic_id)
+        help_win.wait_window()
 
     def _refresh_application_data(self, refresh_accounts=False, refresh_transactions=True):
         """
@@ -284,58 +286,6 @@ class BTViewerApp:
             self._toggle_filter_mode()
         else:
             self._apply_nav_selection_to_datepickers_and_refresh()
-
-    def _on_nav_tree_expand_or_double_click(self, event=None, item_to_expand=None):
-        if not (hasattr(self, 'nav_tree') and self.nav_tree.winfo_exists() and self.db_handler and self.db_handler.is_connected() and self.active_account_id): return
-        
-        item_id = item_to_expand or (self.nav_tree.focus() if self.nav_tree.winfo_exists() else None)
-        if not item_id or item_id.startswith("placeholder_"): return
-        
-        is_open_event = event is not None and hasattr(event, 'type') and str(event.type) == 'TreeviewOpen'
-
-        access_sql, access_params = self._get_access_filter_sql()
-        visibility_sql, visibility_params = self._get_visibility_filter_sql()
-        filter_sql = access_sql + visibility_sql
-
-        if item_id.startswith("year_") and "month" not in item_id:
-            year_str = item_id.split('_')[1]; year_val = int(year_str)
-            placeholder_iid = f"placeholder_months_{year_str}"
-            if self.nav_tree.exists(placeholder_iid):
-                self.nav_tree.delete(placeholder_iid)
-                query = f"SELECT DISTINCT MONTH(data) as luna FROM tranzactii WHERE YEAR(data) = %s AND id_cont_fk = %s {filter_sql} ORDER BY luna ASC"
-                params = [year_val, self.active_account_id] + access_params + visibility_params
-                months_dicts = self.db_handler.fetch_all_dict(query, tuple(params))
-                for month_dict in months_dicts:
-                    month_idx = month_dict['luna']
-                    query_count = f"SELECT COUNT(*) FROM tranzactii WHERE YEAR(data) = %s AND MONTH(data) = %s AND id_cont_fk = %s {filter_sql}"
-                    params_count = [year_val, month_idx, self.active_account_id] + access_params + visibility_params
-                    month_tx_count = self.db_handler.fetch_scalar(query_count, tuple(params_count)) or 0
-                    if month_tx_count > 0:
-                        month_name = self.reverse_month_map_for_nav.get(month_idx, f"Luna {month_idx}")
-                        month_iid = f"{item_id}_month_{month_idx:02d}"
-                        self.nav_tree.insert(item_id, "end", text=f"  {month_name} ({month_tx_count} tranzacții)", iid=month_iid, open=False, tags=('month_node',))
-                        self.nav_tree.insert(month_iid, "end", text="    (Încarcă zile...)", iid=f"placeholder_days_{year_str}_{month_idx:02d}", tags=('day_node',))
-
-        elif "month" in item_id:
-            parts = item_id.split('_'); year_val, month_idx = int(parts[1]), int(parts[3])
-            placeholder_iid = f"placeholder_days_{year_val}_{month_idx:02d}"
-            if self.nav_tree.exists(placeholder_iid):
-                self.nav_tree.delete(placeholder_iid)
-                query = f"SELECT DISTINCT DAY(data) as zi FROM tranzactii WHERE YEAR(data) = %s AND MONTH(data) = %s AND id_cont_fk = %s {filter_sql} ORDER BY zi ASC"
-                params = [year_val, month_idx, self.active_account_id] + access_params + visibility_params
-                days_dicts = self.db_handler.fetch_all_dict(query, tuple(params))
-                for day_dict in days_dicts:
-                    day_val = day_dict['zi']
-                    query_count_day = f"SELECT COUNT(*) FROM tranzactii WHERE YEAR(data) = %s AND MONTH(data) = %s AND DAY(data) = %s AND id_cont_fk = %s {filter_sql}"
-                    params_count_day = [year_val, month_idx, day_val, self.active_account_id] + access_params + visibility_params
-                    day_tx_count = self.db_handler.fetch_scalar(query_count_day, tuple(params_count_day)) or 0
-                    if day_tx_count > 0:
-                        day_display_text = f"    {day_val:02d} ({day_tx_count} tranzacții)"
-                        day_iid = f"{item_id}_day_{day_val:02d}"
-                        self.nav_tree.insert(item_id, "end", text=day_display_text, iid=day_iid, tags=('day_node',))
-
-        if not is_open_event and self.nav_tree.exists(item_id):
-            self.nav_tree.item(item_id, open=not self.nav_tree.item(item_id, "open"))
 
     def _show_window(self):
         """Readuce fereastra în prim-plan și îi dă focus."""
@@ -1998,7 +1948,7 @@ class BTViewerApp:
                         day_iid = f"{item_id}_day_{day_val:02d}"
                         self.nav_tree.insert(item_id, "end", text=day_display_text, iid=day_iid, tags=('day_node',))
 
-        # Această linie trebuie să fie în interiorul metodei, la final
+        # LINIA DE MAI JOS ESTE ACUM INDENTATĂ CORECT ÎN INTERIORUL METODEI
         if not is_open_event and self.nav_tree.exists(item_id):
             self.nav_tree.item(item_id, open=not self.nav_tree.item(item_id, "open"))
 
