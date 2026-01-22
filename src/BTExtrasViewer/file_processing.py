@@ -24,6 +24,7 @@ RE_BENEFICIAR = re.compile(r"\b([A-Z][A-Z\s.\-0-9&]{5,})\b")
 RE_TID = re.compile(r"TID:?\s?(\S+)")
 RE_RRN = re.compile(r"RRN:?\s?(\S+)")
 RE_PAN = re.compile(r"PAN:?\s?(\S+)")
+RE_MID = re.compile(r"MID\s*(\d+)")  # Merchant ID pentru tranzacții POS grupate (BT feb 2026)
 
 def extract_iban_from_mt940(file_path):
     """
@@ -172,21 +173,23 @@ def threaded_import_worker(app_instance, file_paths, q_ref, active_account_id_fo
                 tid_match = RE_TID.search(full_descr)
                 rrn_match = RE_RRN.search(full_descr)
                 pan_match = RE_PAN.search(full_descr)
-                
+                mid_match = RE_MID.search(full_descr)
+
                 cif_val = cif_match.group(1).strip() if cif_match else None
                 beneficiar_val = beneficiar_match.group(1).strip() if beneficiar_match else None
                 factura_val = factura_match.group(1).strip() if factura_match else None
                 tid_val = tid_match.group(1).strip() if tid_match else None
                 rrn_val = rrn_match.group(1).strip() if rrn_match else None
                 pan_val = pan_match.group(1).strip() if pan_match else None
+                mid_val = mid_match.group(1).strip() if mid_match else None
 
                 cursor.execute("SELECT 1 FROM tranzactii WHERE data=%s AND suma=%s AND tip=%s AND descriere=%s AND id_cont_fk=%s",
                                (date_obj.strftime('%Y-%m-%d'), amount, tx_type, full_descr, active_account_id_for_import))
                 if not cursor.fetchone():
-                    sql_insert = ("INSERT INTO tranzactii (id_cont_fk, data, descriere, suma, tip, cod_tranzactie_fk, cif, beneficiar, factura, tid, rrn, pan) "
-                                  "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)")
-                    values = (active_account_id_for_import, date_obj.strftime('%Y-%m-%d'), full_descr, amount, 
-                              tx_type, tx_code_full, cif_val, beneficiar_val, factura_val, tid_val, rrn_val, pan_val)
+                    sql_insert = ("INSERT INTO tranzactii (id_cont_fk, data, descriere, suma, tip, cod_tranzactie_fk, cif, beneficiar, factura, tid, rrn, pan, mid) "
+                                  "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)")
+                    values = (active_account_id_for_import, date_obj.strftime('%Y-%m-%d'), full_descr, amount,
+                              tx_type, tx_code_full, cif_val, beneficiar_val, factura_val, tid_val, rrn_val, pan_val, mid_val)
                     cursor.execute(sql_insert, values)
                     inserted += 1
                 else:

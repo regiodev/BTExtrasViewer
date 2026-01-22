@@ -1,5 +1,5 @@
 BTExtras Suite – Licență Comercială
-Versiunea: v4.7.5
+Versiunea: v4.7.6
 Data emiterii: 03.07.2025
 ==========================================
 

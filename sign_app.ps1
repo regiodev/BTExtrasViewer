@@ -8,7 +8,7 @@ $dlib = "C:\projects\BTExtrasViewer\packages\Microsoft.Trusted.Signing.Client.1.
 $metadata = "C:\projects\BTExtrasViewer\metadata.json"
 
 # Executabilul sau installer-ul tău
-$fileToSign = "C:\projects\BTExtrasViewer\Installer\BTExtras_Suite_Setup_v4.7.5.exe"
+$fileToSign = "C:\projects\BTExtrasViewer\Installer\BTExtras_Suite_Setup_v4.7.6.exe"
 
 & $signtool sign /v /debug `
     /fd sha256 `

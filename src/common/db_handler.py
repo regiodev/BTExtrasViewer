@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS tranzactii (
     tid VARCHAR(100),
     rrn VARCHAR(100),
     pan VARCHAR(100),
+    mid VARCHAR(50),
     cont VARCHAR(100),
     sold_initial DECIMAL(15, 2),
     sold_final DECIMAL(15, 2),
@@ -491,6 +492,13 @@ class DatabaseHandler:
                 logging.warning("Coloana 'last_seen' lipsește. Se adaugă...")
                 cursor.execute("ALTER TABLE utilizatori ADD COLUMN last_seen TIMESTAMP NULL")
                 logging.info("Coloana 'last_seen' a fost adăugată cu succes.")
+
+            # Migrare v4.7.6: Adăugare coloană 'mid' (Merchant ID) pentru tranzacții POS grupate
+            query_check_mid = f"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME = 'tranzactii' AND COLUMN_NAME = 'mid'"
+            if self.fetch_scalar(query_check_mid) == 0:
+                logging.warning("Coloana 'mid' lipsește din tabela 'tranzactii'. Se adaugă...")
+                cursor.execute("ALTER TABLE tranzactii ADD COLUMN mid VARCHAR(50) NULL AFTER pan")
+                logging.info("Coloana 'mid' (Merchant ID) a fost adăugată cu succes.")
 
             self.conn.commit()
             self._seed_initial_data()

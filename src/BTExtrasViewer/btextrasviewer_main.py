@@ -2215,7 +2215,7 @@ class BTViewerApp:
         fields_to_show = [("ID:", "id"), ("Dată:", "data"), ("Sumă:", "suma"), ("Tip:", "tip"),
                           ("Descriere Tip Tranzacție:", "descriere_tip"), # <<< LINIE NOUĂ ADĂUGATĂ
                           ("Beneficiar:", "beneficiar"), ("CIF:", "cif"), ("Factură:", "factura"),
-                          ("TID:", "tid"), ("RRN:", "rrn"),("PAN Mascat:", "pan"),
+                          ("TID:", "tid"), ("RRN:", "rrn"), ("PAN Mascat:", "pan"), ("MID:", "mid"),
                           ("Descriere completă:", "descriere"), ("Observații (editabil):", "observatii")]
 
         row_idx = 0
