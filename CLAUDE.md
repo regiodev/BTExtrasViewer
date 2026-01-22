@@ -224,7 +224,7 @@ Saved via `save_app_config()` in `config_management.py`, which calls `db_handler
 2. If database connection fails or config doesn't exist, shows database configuration dialog
 3. Shows `LoginDialog` (from `ui_dialogs.py`)
 4. On first run, auto-creates admin user (username: `admin`, password: `admin123`)
-5. `auth_handler.verifica_parola()` validates password using stored salt and hash (PBKDF2 with 100,000 iterations)
+5. `auth_handler.verifica_parola()` validates password using stored salt and hash (PBKDF2 with 390,000 iterations)
 6. `db_handler.get_user_with_full_context()` loads user data with roles, permissions, and allowed accounts
 7. Session Manager is notified of authenticated user via socket on port 12343
 
