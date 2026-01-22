@@ -27,7 +27,8 @@ from BTExtrasViewer.file_processing import (
 from BTExtrasViewer.email_handler import send_email_with_memory_attachment
 
 from BTExtrasViewer import email_composer
-from BTExtrasViewer.ui_help import HelpDialog # Adăugați această linie
+from BTExtrasViewer.ui_help import HelpBrowser
+from BTExtrasViewer.ui_about import AboutDialog
 from common.app_constants import CHAT_COMMAND_PORT, VIEWER_COMMAND_PORT, SESSION_COMMAND_PORT, VIEWER_LOCK_PORT
 
 
@@ -191,11 +192,15 @@ class BTViewerApp:
                 'y': self.master.winfo_y()
             }
 
-    def _show_help_dialog(self, initial_topic_id='welcome'):
-        """Deschide fereastra de ajutor, opțional la un subiect specific."""
-        # 'self.master' este fereastra principală a aplicației
-        help_win = HelpDialog(self.master, initial_topic_id=initial_topic_id)
-        help_win.wait_window()
+    def _show_help_browser(self, initial_topic_id='welcome'):
+        """Deschide browserul de help profesional."""
+        help_browser = HelpBrowser(self.master, initial_topic_id=initial_topic_id)
+        help_browser.wait_window()
+
+    def _show_about_dialog(self):
+        """Deschide dialogul 'Despre BTExtras Suite'."""
+        about_dialog = AboutDialog(self.master)
+        about_dialog.wait_window()
 
     def _refresh_application_data(self, refresh_accounts=False, refresh_transactions=True):
         """
@@ -939,13 +944,12 @@ class BTViewerApp:
             if self.has_permission('run_report_transaction_analysis'):
                 reports_menu.add_command(label="Analiză Detaliată Tranzacții...", command=self.show_transaction_analysis_report)
     
-        # === Meniul Help (cu comanda corectată) ===
+        # === Meniul Help ===
         help_menu = tk.Menu(menubar, tearoff=0, font=(default_font_family, default_font_size))
         menubar.add_cascade(label="Ajutor", menu=help_menu)
-        help_menu.add_command(label="Afișează Ghid de Utilizare...", command=self._show_help_dialog)
+        help_menu.add_command(label="Ghid de Utilizare...", command=self._show_help_browser)
         help_menu.add_separator()
-        # << MODIFICARE: Folosim 'initial_topic_id' și ID-ul corect 'about' >>
-        help_menu.add_command(label="Despre BTExtras Suite...", command=lambda: self._show_help_dialog(initial_topic_id="about"))
+        help_menu.add_command(label="Despre BTExtras Suite...", command=self._show_about_dialog)
 
     def _show_change_password_dialog(self):
         """Deschide dialogul pentru schimbarea voluntară a parolei."""
