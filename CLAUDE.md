@@ -84,14 +84,34 @@ The project uses PyInstaller to create executables and Inno Setup for the instal
 1. **Build executables with PyInstaller** (create .spec files as needed):
    ```bash
    # Build Session Manager
-   pyinstaller --name "BTExtras Suite" --windowed --icon=src/assets/BT_logo.ico src/session_manager.py
+   # IMPORTANT: Session Manager requires --collect-all for pystray and keyboard modules,
+   # and --add-data to include assets folder for system tray icon
+   python -m PyInstaller --name "BTExtras Suite" --windowed \
+       --icon=src/assets/BT_logo.ico \
+       --collect-all=pystray \
+       --collect-all=keyboard \
+       --add-data "src/assets;assets" \
+       src/session_manager.py
 
    # Build Viewer
-   pyinstaller --name "BTExtrasViewer" --windowed --icon=src/assets/BT_logo.ico src/BTExtrasViewer/btextrasviewer_main.py
+   python -m PyInstaller --name "BTExtrasViewer" --windowed \
+       --icon=src/assets/BT_logo.ico \
+       src/BTExtrasViewer/btextrasviewer_main.py
 
    # Build Chat
-   pyinstaller --name "BTExtrasChat" --windowed --icon=src/assets/BTExtrasChat.ico src/BTExtrasChat/chat_main.py
+   python -m PyInstaller --name "BTExtrasChat" --windowed \
+       --icon=src/assets/BTExtrasChat.ico \
+       src/BTExtrasChat/chat_main.py
    ```
+
+   **PyInstaller Build Notes:**
+   - Use `python -m PyInstaller` instead of `pyinstaller` for better compatibility
+   - Session Manager dependencies that require explicit inclusion:
+     - `pystray` - System tray functionality (use `--collect-all=pystray`)
+     - `keyboard` - Global hotkeys (use `--collect-all=keyboard`)
+     - `assets/` folder - Icons for system tray (use `--add-data "src/assets;assets"`)
+   - On Windows, `--add-data` uses semicolon (`;`) as separator
+   - On Linux/macOS, `--add-data` uses colon (`:`) as separator
 
 2. **Create installer** - The Inno Setup script `BTExtras_Suite_Installer.iss` expects executables in:
    - `dist/BTExtras Suite/` - Session Manager executable
