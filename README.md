@@ -1,4 +1,4 @@
-# BTExtras Suite v4.7.4
+# BTExtras Suite v4.7.5
 
 ![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
@@ -207,7 +207,7 @@ Folosiți **Inno Setup** pentru a compila scriptul `BTExtras_Suite_Installer.iss
 * **Viewer** - Opțional
 * **Chat** - Opțional
 
-Installatorul final va fi generat în directorul `Installer/` cu numele `BTExtras_Suite_Setup_v4.7.4.exe`.
+Installatorul final va fi generat în directorul `Installer/` cu numele `BTExtras_Suite_Setup_v4.7.5.exe`.
 
 ---
 
