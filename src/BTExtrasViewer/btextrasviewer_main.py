@@ -719,7 +719,12 @@ class BTViewerApp:
             select_clause_export = "data, descriere, observatii, suma, tip, cif, factura, beneficiar"
             query = f"SELECT {select_clause_export} FROM tranzactii WHERE id_cont_fk = %s"
             params = [self.active_account_id]
-            
+
+            # --- FILTRARE ACCES (CREDIT/DEBIT) ---
+            access_sql, access_params = self._get_access_filter_sql()
+            query += access_sql
+            params.extend(access_params)
+
             start_date_for_export, end_date_for_export = None, None
             if self.date_range_mode_var.get():
                 if hasattr(self, 'start_date') and self.start_date.get(): start_date_for_export = self.start_date.get_date()
@@ -2337,6 +2342,11 @@ class BTViewerApp:
         select_clause_export = "data, descriere, observatii, suma, tip, cif, factura, beneficiar"
         query = f"SELECT {select_clause_export} FROM tranzactii WHERE id_cont_fk = %s"
         params = [self.active_account_id]
+
+        # --- FILTRARE ACCES (CREDIT/DEBIT) ---
+        access_sql, access_params = self._get_access_filter_sql()
+        query += access_sql
+        params.extend(access_params)
 
         start_date_for_export, end_date_for_export = None, None
         if self.date_range_mode_var.get():
