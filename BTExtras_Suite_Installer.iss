@@ -1,14 +1,14 @@
 ; =================================================================
-; == BTExtras Suite Installer - Professional Edition v4.7.3 ==
+; == BTExtras Suite Installer - Professional Edition v4.7.4 ==
 ; =================================================================
 ; Build: Inno Setup 6.2+
 ; =================================================================
 
 #define MyAppName "BTExtras Suite"
-#define MyAppVersion "4.7.3"
+#define MyAppVersion "4.7.4"
 #define MyAppPublisher "Regio Development SRL"
-#define MyAppURL "https://regio-cloud.ro/software"
-#define MyAppSupportURL "https://regio-cloud.ro/software/support"
+#define MyAppURL "https://regio-development.ro"
+#define MyAppSupportURL "https://regio-development.ro/contact"
 #define MyAppCopyright "© 2025 Regio Development SRL"
 
 [Setup]

@@ -11,7 +11,7 @@ The suite consists of three interconnected applications:
 - **BTExtrasViewer** - Main application for bank statement import, viewing, filtering, and reporting
 - **BTExtrasChat** - Integrated secure chat application for internal communication
 
-Version: 4.7.3
+Version: 4.7.4
 
 ## Development Commands
 
@@ -104,7 +104,7 @@ The project uses PyInstaller to create executables and Inno Setup for the instal
    - **Chat** - Optional
 
    Compile with Inno Setup to generate the installer in `Installer/` directory.
-   Output filename: `BTExtras_Suite_Setup_v4.7.3.exe`
+   Output filename: `BTExtras_Suite_Setup_v4.7.4.exe`
 
 ## Architecture
 
